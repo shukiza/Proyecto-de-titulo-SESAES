@@ -41,6 +41,7 @@ from app.services.agenda_disponibilidad_service import (
     SlotInvalidoError,
     canonicalizar_fecha_valida,
 )
+from app.services.cita_origen_service import resolver_origen_cita
 
 
 
@@ -1553,9 +1554,20 @@ def crear_cita_urgente(cita: CitaCreate, db: Session = Depends(get_db), current_
     # canonicalizar_fecha_valida()); se reutiliza también abajo para el
     # lock y hay_solapamiento_con_cita_activa. Guardar el string crudo
     # aquí era precisamente el hueco que A.3 (v2) dejaba abierto.
+    # A.4.1 — mismo criterio de origen que POST /citas (ver
+    # app.services.cita_origen_service): current_user ya viene resuelto
+    # por get_current_user() contra el estado ACTUAL de Usuario en BD.
+    # A.4.1 NO cambia nada más de este endpoint: sigue sin pasar por
+    # evaluar_disponibilidad_slot(), sigue sin crear CitaSobrecupo, y
+    # conserva exactamente su auditoría actual ("Creó cita urgente").
+    origen = resolver_origen_cita(db, current_user)
+
     nueva = Cita(estudiante_id=cita.estudiante_id, profesional_id=cita.profesional_id,
                  fecha=fecha_canon, hora=cita.hora, observaciones=cita.observaciones,
-                 estado="pendiente", urgente=True)
+                 estado="pendiente", urgente=True,
+                 creado_por_usuario_id=origen.creado_por_usuario_id,
+                 creado_por_rol=origen.creado_por_rol,
+                 creado_por_perfil=origen.creado_por_perfil)
 
     # A.3 — concurrencia/doble-reserva, y cierre del hueco de ocupación
     # que este endpoint tenía desde A.2 (ver diagnóstico de A.3):

@@ -563,6 +563,59 @@ def obtener_alcance_administrativo_efectivo(
     )
 
 
+def resolver_perfil_administrativo_snapshot(
+    db: Session,
+    current_user: object,
+) -> str | None:
+    """
+    A.4.1 — snapshot INMUTABLE de AccesoAdministrativo.perfil vigente
+    en el momento de una acción, para trazabilidad de origen (p. ej.
+    Cita.creado_por_perfil). NO es una función de autorización: no
+    concede ni verifica ningún permiso, solo describe quién creó algo.
+
+    Reutiliza obtener_contexto_admin() en vez de reimplementar la
+    resolución de perfil, así que hereda su mismo criterio
+    fail-closed:
+      - rol distinto de ADMIN (incluido SUPERADMIN, que no depende de
+        AccesoAdministrativo, y PROFESIONAL/ESTUDIANTE) -> None;
+      - ADMIN sin fila AccesoAdministrativo, o con una configuración
+        inválida/inconsistente -> None;
+      - nunca "adivina" ni aproxima un perfil — None es siempre la
+        respuesta honesta cuando no hay un perfil real que reportar.
+
+    No depende de que el permiso esté además persistido
+    (AccesoAdminPermiso): un ADMIN con perfil válido pero sin ningún
+    permiso concedido todavía tiene un perfil real que registrar como
+    snapshot de trazabilidad — eso es una pregunta de identidad, no
+    de autorización efectiva (que ya se resolvió antes, en el
+    endpoint, con tiene_permiso_efectivo/require_effective_permission).
+    """
+    if not isinstance(current_user, dict):
+        return None
+
+    # A.4.1 v2 — guard EXPLÍCITO por rol antes de tocar
+    # AccesoAdministrativo: aunque obtener_contexto_admin() ya
+    # devuelve None para cualquier rol distinto de ADMIN (porque
+    # normaliza current_user["rol"] y compara contra Role.ADMIN
+    # internamente), ese comportamiento dependía de la implementación
+    # interna de _cargar_contexto_admin_desde_usuario(), no de un
+    # chequeo visible acá. Se hace explícito para que, incluso si en
+    # el futuro esa función cambiara de criterio, o si por datos
+    # legacy/stale existiera accidentalmente una fila
+    # AccesoAdministrativo asociada a un usuario que YA NO es ADMIN
+    # (p. ej. degradado a SUPERADMIN/ESTUDIANTE/PROFESIONAL sin borrar
+    # su fila vieja), un actor no-ADMIN JAMÁS reciba un
+    # creado_por_perfil.
+    if current_user.get("rol") != "admin":
+        return None
+
+    contexto = obtener_contexto_admin(db, current_user.get("id"))
+    if contexto is None:
+        return None
+
+    return contexto.perfil.value
+
+
 def especialidad_permitida_por_alcance(
     alcance: AlcanceAdministrativoEfectivo | None,
     especialidad: object,

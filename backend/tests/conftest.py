@@ -8,6 +8,7 @@ en el registry de SQLAlchemy antes de que configure_mappers() sea necesario.
 import app.models.acceso_administrativo
 import app.models.auditoria
 import app.models.cita
+import app.models.cita_sobrecupo
 import app.models.configuracion
 import app.models.correo_log
 import app.models.dia_cerrado

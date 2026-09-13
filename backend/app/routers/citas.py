@@ -8,11 +8,13 @@ import os
 
 from app.database import get_db
 from app.models.cita import Cita
+from app.models.cita_sobrecupo import CitaSobrecupo, CitaSobrecupoConflicto
 from app.models.profesional import Profesional
 from app.models.usuario import Usuario
 from app.models.historial_paciente import HistorialPaciente
 from app.models.notificacion import Notificacion
 from app.schemas import CitaCreate
+from app.auditoria import registrar_evento_auditoria
 from app.auth_dependencies import get_current_user, verificar_acceso
 from app.rbac.permissions import Permission
 from app.rbac.admin_authorization import (
@@ -27,6 +29,7 @@ from app.services.agenda_disponibilidad_service import (
     canonicalizar_fecha_valida,
     SlotInvalidoError,
 )
+from app.services.cita_origen_service import resolver_origen_cita
 
 router = APIRouter(tags=["citas"])
 
@@ -327,6 +330,14 @@ def crear_cita(
         fecha=fecha_canon,
         hora=cita.hora,
     )
+    # A.4.1 — motivo estructurado REALMENTE superado, si lo hay. Solo se
+    # llena cuando evaluar_disponibilidad_slot() encontró un motivo
+    # overridable y sobrecupo lo autorizó — nunca se inventa un
+    # "conflicto" para el caso (posible, si alguien llama a la API
+    # directamente con sobrecupo=True sobre un slot que ya estaba
+    # libre) en que no hubo nada real que superar. Ver
+    # app.models.cita_sobrecupo.CitaSobrecupo.
+    motivo_conflicto_superado: str | None = None
     if not resultado_disponibilidad.disponible:
         sobrecupo_autoriza = (
             puede_gestionar_agenda
@@ -351,6 +362,7 @@ def crear_cita(
                 status_code=status_code,
                 detail=resultado_disponibilidad.mensaje or "Esa hora no está disponible.",
             )
+        motivo_conflicto_superado = resultado_disponibilidad.motivo
 
     if prof:
         # Una cita "pendiente" solo debe bloquear un nuevo agendamiento si
@@ -380,6 +392,13 @@ def crear_cita(
             raise HTTPException(status_code=400,
                 detail="Ya tienes una cita pendiente en esta especialidad")
 
+    # A.4.1 — origen de la cita: SIEMPRE el actor autenticado de esta
+    # request (current_user), nunca un valor del body. Ver
+    # app.services.cita_origen_service — misma función usada por
+    # POST /admin/citas/urgente, para que ambos canales registren el
+    # origen con exactamente el mismo criterio.
+    origen = resolver_origen_cita(db, current_user)
+
     nueva = Cita(
         estudiante_id  = cita.estudiante_id,
         profesional_id = cita.profesional_id,
@@ -398,16 +417,37 @@ def crear_cita(
             if puede_gestionar_agenda
             else False
         ),
-        sobrecupo      = (
-            bool(cita.sobrecupo)
-            if puede_gestionar_agenda
-            else False
-        ),
-        estado         = "pendiente"
+        # A.4.1 v2 — "sobrecupo efectivo": Cita.sobrecupo representa la
+        # intención del cliente autorizada Y CONFIRMADA por la
+        # re-evaluación DENTRO del lock A.3, no la intención cruda que
+        # llegó en el body. Si el cliente pidió sobrecupo=True pero,
+        # al re-evaluar dentro del lock, el slot resultó realmente
+        # disponible (p. ej. la cita que antes lo bloqueaba fue
+        # cancelada mientras tanto), NO hay ningún conflicto que
+        # "sobrecupo" esté superando — persistir True ahí crearía dos
+        # fuentes de verdad contradictorias (Cita.sobrecupo=True sin
+        # ningún CitaSobrecupo/conflicto/auditoría que lo respalde,
+        # como pasaba en A.4.1 v1). motivo_conflicto_superado ya es
+        # None en ese caso (ver arriba), así que basta con usarlo como
+        # única fuente de verdad — nunca se rechaza la cita solo
+        # porque el conflicto desapareció; eso es una mejora legítima
+        # de la concurrencia, no un error.
+        sobrecupo      = motivo_conflicto_superado is not None,
+        estado         = "pendiente",
+        creado_por_usuario_id = origen.creado_por_usuario_id,
+        creado_por_rol        = origen.creado_por_rol,
+        creado_por_perfil     = origen.creado_por_perfil,
     )
     db.add(nueva)
     try:
-        db.commit()
+        # A.4.1 — flush (no commit todavía): necesitamos nueva.id para
+        # poder crear, en la MISMA transacción, el detalle de
+        # sobrecupo y su evento de auditoría cuando corresponda (ver
+        # abajo). Mismo patrón que ya usa POST /admin/citas/urgente
+        # (admin.py) — Cita + CitaSobrecupo + CitaSobrecupoConflicto +
+        # Auditoria se confirman o se deshacen juntos con un único
+        # commit al final.
+        db.flush()
     except IntegrityError:
         # A.3 — esta red de seguridad NO es (nunca lo fue) la
         # protección real contra doble reserva: Cita no tiene, ni tuvo
@@ -425,6 +465,43 @@ def crear_cita(
             status_code=409,
             detail="Esa hora acaba de ser reservada por otra persona. Por favor elige otra."
         )
+
+    # A.4.1 — auditoría de sobrecupo (hallazgo confirmado en el
+    # diagnóstico A.4: POST /citas hoy NO auditaba la creación de
+    # sobrecupo, a diferencia de POST /admin/citas/urgente). Se
+    # registra si y solo si hubo sobrecupo EFECTIVO
+    # (motivo_conflicto_superado no es None, ver arriba) — nunca
+    # cuando cita.sobrecupo=True llegó marcado sobre un slot que, tras
+    # la re-evaluación dentro del lock, resultó realmente libre.
+    if motivo_conflicto_superado is not None:
+        detalle_sobrecupo = CitaSobrecupo(
+            cita_id=nueva.id,
+            # sobrecupo_motivo todavía no lo envía el frontend actual
+            # (ver CitaCreate.sobrecupo_motivo) — queda NULL hasta que
+            # A.4.7 actualice el modal de Angular. No se exige acá
+            # para no romper el flujo existente.
+            motivo=cita.sobrecupo_motivo,
+            estado_revision=None,
+        )
+        db.add(detalle_sobrecupo)
+        db.flush()
+        db.add(CitaSobrecupoConflicto(
+            cita_sobrecupo_id=detalle_sobrecupo.id,
+            codigo=motivo_conflicto_superado,
+        ))
+        registrar_evento_auditoria(
+            db, current_user, "Creó cita con sobrecupo",
+            entidad="cita", entidad_id=nueva.id,
+            detalle=(
+                f"Estudiante id {cita.estudiante_id} — Profesional id "
+                f"{cita.profesional_id} ({nueva.fecha} {nueva.hora}). "
+                f"Conflicto superado: {motivo_conflicto_superado}. "
+                f"Motivo informado: {cita.sobrecupo_motivo or '(no informado por el cliente)'}. "
+                f"Perfil administrativo del actor: {origen.creado_por_perfil or '-'}."
+            ),
+        )
+
+    db.commit()
     db.refresh(nueva)
 
     # Si es la primera vez que este estudiante agenda con este profesional

@@ -16,6 +16,14 @@ class CitaCreate(BaseModel):
     observaciones:  Optional[str] = None
     urgente:        Optional[bool] = False
     sobrecupo:      Optional[bool] = False   # solo admin puede marcarla; se ignora si la manda cualquier otro rol
+    # A.4.1 — motivo HUMANO del sobrecupo (distinto de `observaciones`,
+    # que es el motivo de consulta clínica). Opcional TEMPORALMENTE: el
+    # frontend actual (dashboard-admin.ts) todavía no lo envía en el
+    # body de POST /citas. Ver deuda documentada en
+    # app.models.cita_sobrecupo.CitaSobrecupo.motivo — A.4.7 debe
+    # actualizar el modal de Angular antes de evaluar si corresponde
+    # exigirlo para sobrecupos nuevos.
+    sobrecupo_motivo: Optional[str] = None
 
 
 class CompletarCitaBody(BaseModel):
