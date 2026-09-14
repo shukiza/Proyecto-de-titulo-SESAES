@@ -156,7 +156,7 @@ def get_citas_estudiante(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    _verificar_propietario_o_agenda(current_user, estudiante_id)
+    _verificar_propietario_o_agenda(current_user, estudiante_id, db)
     citas = db.query(Cita).filter(
         Cita.estudiante_id == estudiante_id,
         Cita.estado == "pendiente"
