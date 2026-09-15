@@ -263,6 +263,90 @@ Alcance explícito de A.2 (ver auditoría previa de Agenda V2):
   `slot_ocupado` sigue siendo overridable_con_sobrecupo=False, sin
   cambios — esta sección solo decide CUÁNDO se evalúa (dentro del
   lock, no antes), no QUÉ motivos son superables.
+
+── A.4.2 — analizador estructurado de conflictos ──
+
+  Hasta acá, la precedencia de motivos vivía como una cadena de
+  `if`/`return` con cortocircuito dentro de `_evaluar_slot_en_contexto()`:
+  apenas aplicaba un motivo, se devolvía de inmediato y ningún otro
+  motivo simultáneo del mismo slot quedaba siquiera evaluado. Eso
+  bastaba para decidir disponible/no-disponible, pero no alcanza para
+  que una fase futura (aprobación de sobrecupo, notificación,
+  unificación de urgencia) pueda razonar sobre TODO lo que está
+  pasando con un slot a la vez (p. ej. que exceda el cierre del centro
+  Y quede fuera de la jornada del profesional al mismo tiempo).
+
+  UNA SOLA FUENTE DE VERDAD (sin dos motores de disponibilidad):
+  `analizar_conflictos_slot()` es ahora la ÚNICA implementación de las
+  reglas de un slot con contexto ya válido (profesional activo,
+  fecha/hora ya parseadas): función PURA que, en un solo recorrido,
+  devuelve TODOS los conflictos reales y simultáneos que sean
+  técnicamente determinables, como una tupla de `ConflictoSlot` en el
+  mismo orden de precedencia histórico (ver su docstring). Sobre esa
+  misma lista se reduce todo lo demás:
+
+    - `_evaluar_slot_en_contexto()` pasó a ser un wrapper delgado:
+      llama a `analizar_conflictos_slot()` y, si la lista no está
+      vacía, toma el PRIMER conflicto (ya viene en orden de
+      precedencia) y lo traduce al mismo
+      (disponible, motivo, mensaje, overridable_con_sobrecupo) de
+      siempre — mismo motivo, mismo mensaje exacto, mismo
+      overridable — vía `_mensaje_legacy_para()`. Si la lista viene
+      vacía, el slot está disponible, igual que antes. Ya NO
+      reimplementa ninguna condición por su cuenta: no hay dos
+      motores de disponibilidad, hay un solo análisis y una reducción
+      determinista sobre su resultado.
+    - `evaluar_disponibilidad_slot()` llama a `analizar_conflictos_slot()`
+      UNA sola vez y reduce esa misma tupla con `_legacy_desde_conflictos()`
+      (la misma reducción que usa `_evaluar_slot_en_contexto()`) para
+      obtener disponible/motivo/mensaje/overridable — nunca hay una
+      segunda llamada independiente al analizador para obtener
+      `ResultadoDisponibilidad.conflictos` (nuevo campo, default `()`):
+      es literalmente la misma tupla.
+
+  Esto no cambia NINGÚN mensaje HTTP, código de estado, ni el
+  contrato de `listar_disponibilidad_rango()` — sigue delegando en
+  `_evaluar_slot_en_contexto()`, así que hereda la reducción sin
+  cambiar su forma de retorno.
+
+  NO incluye en `analizar_conflictos_slot()` (a propósito):
+  `profesional_no_encontrado`, `profesional_inactivo`, `fecha_invalida`,
+  `hora_invalida` — son precondiciones que impiden construir el
+  contexto que la función recibe (profesional válido, fecha/hora ya
+  parseadas); siguen resolviéndose en el wrapper público
+  `evaluar_disponibilidad_slot()`, exactamente como antes de A.4.2.
+  Para esos casos, `ResultadoDisponibilidad.conflictos` queda `()`
+  — el análisis estructurado ni siquiera llega a correr.
+
+  RELOJ DETERMINISTA: `analizar_conflictos_slot()` nunca lee el reloj
+  global — el chequeo `hora_pasada` recibe la hora "actual" como
+  parámetro inyectado (`ahora: time | None`), nunca vía
+  `datetime.now()` interno. `evaluar_disponibilidad_slot()` captura
+  `datetime.now()` UNA sola vez por evaluación y pasa ese mismo
+  snapshot tanto al análisis estructurado como (indirectamente, por
+  ser la misma reducción) a la decisión legacy — no hay forma de que
+  ambos discrepen porque el minuto cambió entre dos lecturas del
+  reloj, porque ya no hay dos lecturas. `listar_disponibilidad_rango()`
+  sigue el mismo patrón que ya usaba para `hoy` (una sola captura
+  antes del loop de días/slots, no una por slot). Si `ahora` se omite
+  (compatibilidad hacia atrás), el chequeo `hora_pasada` simplemente
+  no se evalúa — no se sustituye por una lectura de reloj interna.
+
+  EQUIVALENCIA `overridable_con_sobrecupo` / `hay_bloqueo_absoluto()`:
+  documentada únicamente para resultados con contexto analizable, es
+  decir, cuando `analizar_conflictos_slot()` corrió de verdad (ver
+  docstring de `hay_bloqueo_absoluto()`) — NO es una equivalencia
+  universal sobre cualquier `ResultadoDisponibilidad`: los cuatro
+  motivos terminales de arriba pueden devolver
+  `overridable_con_sobrecupo=False` junto con `conflictos=()`, donde
+  `hay_bloqueo_absoluto(())` es `False` por vacuidad — ambos valores
+  existen ahí pero no son la misma pregunta.
+
+  A.4.2 no cambia la política de sobrecupo en sí (qué motivos son
+  overridable sigue siendo exactamente lo mismo que ya decidía A.2),
+  no agrega aprobación, notificación, permisos nuevos, ni toca
+  `POST /admin/citas/urgente` — sigue completamente fuera de este
+  análisis, igual que en A.2/A.3 (ver arriba).
 """
 
 from __future__ import annotations
@@ -352,6 +436,72 @@ class ProfesionalNoEncontradoError(LookupError):
 
 
 @dataclass(frozen=True)
+class ConflictoSlot:
+    """
+    A.4.2 — un motivo estructurado y determinable de por qué un slot no
+    está disponible, producido por `analizar_conflictos_slot()` — la
+    ÚNICA implementación de las reglas de un slot con contexto ya
+    válido (ver docstring del módulo y de esa función). A diferencia
+    del `motivo` único que ya devolvía `evaluar_disponibilidad_slot()`
+    desde A.2A, `ConflictoSlot` permite describir TODOS los conflictos
+    reales y simultáneos de un slot, no solo el primero en precedencia.
+
+    Campos:
+      - `codigo`: el mismo código de motivo de siempre (p. ej.
+        "en_colacion", "slot_ocupado") — no un vocabulario nuevo.
+      - `categoria`: agrupación estable y determinista del tipo de
+        conflicto ("precondicion", "calendario_centro",
+        "grilla_centro", "ocupacion", "jornada_profesional") — ver
+        docstring de `analizar_conflictos_slot()`.
+      - `overridable_con_sobrecupo`: mismo criterio ya vigente por
+        código — un sobrecupo autorizado solo puede superar conflictos
+        con este flag en True.
+      - `metadata`: SIEMPRE JSON-serializable — solo strings
+        canónicos ("HH:MM" / "YYYY-MM-DD") e integers, nunca objetos
+        `datetime.time`/`date` ni IDs técnicos de citas ocupantes.
+    """
+
+    codigo: str
+    categoria: str
+    overridable_con_sobrecupo: bool
+    metadata: dict
+
+
+def hay_bloqueo_absoluto(conflictos: tuple[ConflictoSlot, ...]) -> bool:
+    """
+    A.4.2 — True si CUALQUIERA de los conflictos estructurados
+    presentes es un bloqueo absoluto (`overridable_con_sobrecupo=False`).
+
+    Regla vigente (sin cambios de política respecto a A.4.1, solo
+    ahora expresada sobre la lista completa en vez de un único
+    motivo): si existe cualquier conflicto absoluto, el sobrecupo
+    actual NO puede autorizarse — sin importar cuántos otros
+    conflictos overridables lo acompañen. Si TODOS los conflictos
+    presentes son overridables, puede continuar aplicándose la
+    política de sobrecupo que ya existía (A.4.1/A.2). Esto no habilita
+    ningún caso de sobrecupo nuevo.
+
+    Equivalencia con `ResultadoDisponibilidad.overridable_con_sobrecupo`:
+    para resultados con CONTEXTO ANALIZABLE (es decir, cuando
+    `analizar_conflictos_slot()` corrió de verdad — ver docstring de
+    esa función), `overridable_con_sobrecupo=True` y
+    `not hay_bloqueo_absoluto(conflictos)` son siempre equivalentes,
+    porque la precedencia histórica evalúa todos los motivos absolutos
+    antes que cualquier motivo overridable. Esto NO es una equivalencia
+    universal: para las precondiciones terminales de
+    `evaluar_disponibilidad_slot()` (profesional_no_encontrado,
+    profesional_inactivo, fecha_invalida, hora_invalida), el análisis
+    ni siquiera corre — ahí `conflictos` es `()`,
+    `hay_bloqueo_absoluto(())` es `False` por vacuidad, y sin embargo
+    `overridable_con_sobrecupo` sigue siendo `False`. Por eso la
+    autorización de sobrecupo en POST /citas comprueba AMBAS
+    condiciones explícitamente (ver app/routers/citas.py), no una sola
+    asumiendo que son intercambiables en todos los casos.
+    """
+    return any(not conflicto.overridable_con_sobrecupo for conflicto in conflictos)
+
+
+@dataclass(frozen=True)
 class ResultadoDisponibilidad:
     """Resultado de evaluar un profesional+fecha+hora puntual."""
 
@@ -363,6 +513,16 @@ class ResultadoDisponibilidad:
     # sobrecupo puede saltarse.
     overridable_con_sobrecupo: bool
     profesional: Profesional | None
+    # A.4.2 — TODOS los conflictos estructurados reales y determinables
+    # del slot (no solo el motivo ganador de arriba), en el mismo orden
+    # de precedencia histórico. Default () para no romper ningún
+    # caller/test existente que construya ResultadoDisponibilidad
+    # posicionalmente sin este campo. Queda vacío en los casos en los
+    # que ni siquiera existe contexto suficiente para analizar
+    # (profesional_no_encontrado, profesional_inactivo, fecha_invalida,
+    # hora_invalida) — ver analizar_conflictos_slot() y
+    # hay_bloqueo_absoluto().
+    conflictos: tuple[ConflictoSlot, ...] = ()
 
 
 def _parsear_hora_24h(hora_str: str | None) -> time | None:
@@ -865,6 +1025,311 @@ def excede_ventana_agendamiento_estudiante(
     return fecha_obj > (date.today() + timedelta(days=ventana_dias))
 
 
+# Mismo texto exacto que devolvía _evaluar_slot_en_contexto() antes de
+# A.4.2 para cada motivo — ver _mensaje_legacy_para(). "dia_cerrado" no
+# está acá porque su mensaje depende de dia_cerrado.motivo (se arma
+# aparte, a partir de la metadata del propio ConflictoSlot).
+_MENSAJES_LEGACY_POR_CODIGO: dict[str, str] = {
+    "fecha_pasada": "No es posible agendar en una fecha que ya pasó.",
+    "fin_de_semana": "El centro no atiende los fines de semana.",
+    "hora_pasada": "Esa hora ya pasó.",
+    "hora_fuera_de_grilla": "Esa hora no corresponde a un bloque de atención válido.",
+    "excede_cierre_centro": "La duración de la cita excede el horario de atención del centro.",
+    "slot_ocupado": "Esa hora ya está reservada.",
+    "fuera_de_jornada": "La hora solicitada está fuera del horario habitual del profesional.",
+    "en_colacion": "La hora solicitada cae en el horario de colación del profesional.",
+}
+
+
+def _mensaje_legacy_para(conflicto: ConflictoSlot) -> str:
+    """
+    Traduce un ConflictoSlot al mismo texto EXACTO que devolvía
+    _evaluar_slot_en_contexto() para ese motivo antes de A.4.2 — ver
+    `_MENSAJES_LEGACY_POR_CODIGO`. "dia_cerrado" es el único caso
+    dinámico (depende del motivo del DiaCerrado real), reconstruido
+    acá a partir de `conflicto.metadata["motivo_dia_cerrado"]` en vez
+    de recibir el objeto DiaCerrado por separado — así el wrapper
+    legacy solo necesita el ConflictoSlot, ninguna otra entrada.
+    """
+    if conflicto.codigo == "dia_cerrado":
+        motivo_dia_cerrado = conflicto.metadata.get("motivo_dia_cerrado") or ""
+        return f"El centro permanece cerrado ese día. {motivo_dia_cerrado}".strip()
+    return _MENSAJES_LEGACY_POR_CODIGO[conflicto.codigo]
+
+
+def analizar_conflictos_slot(
+    *,
+    profesional: Profesional,
+    fecha_obj: date,
+    hora_obj: time,
+    hoy: date,
+    dia_cerrado: DiaCerrado | None,
+    ocupadas: set[time],
+    bloques_grilla: list[time] | None = None,
+    ahora: time | None = None,
+) -> tuple[ConflictoSlot, ...]:
+    """
+    A.4.2 — ÚNICA implementación de las reglas de UN slot ya parseado
+    (profesional, fecha, hora) con contexto ya válido: todo lo que
+    necesita (profesional, si el día está cerrado, qué horas están
+    ocupadas) ya viene precargado por quien llama, igual que antes
+    tomaba `_evaluar_slot_en_contexto()`. Función PURA: no toca base
+    de datos NI el reloj global (ver "RELOJ DETERMINISTA" más abajo).
+
+    UNA SOLA FUENTE DE VERDAD: esta función reemplaza por completo la
+    cadena de `if`/`return` con cortocircuito que antes vivía en
+    `_evaluar_slot_en_contexto()` — esa función ya NO reimplementa
+    ninguna condición por su cuenta, es un wrapper delgado que llama
+    acá y reduce el resultado (ver `_legacy_desde_conflictos()`). No
+    hay dos motores de disponibilidad: cada condición de acá es la
+    ÚNICA fuente de ese motivo, tanto para el análisis estructurado
+    como para la decisión legacy de siempre.
+
+    A diferencia de la cadena legacy original (que cortaba en el
+    primer motivo que aplicaba), acá cada condición se evalúa siempre,
+    sin importar si una condición anterior ya aplicó — así un slot
+    puede acumular, por ejemplo, `slot_ocupado` + `fuera_de_jornada` +
+    `en_colacion` a la vez, o `excede_cierre_centro` +
+    `fuera_de_jornada`. Se devuelven TODOS los conflictos reales y
+    simultáneos que sean técnicamente determinables, en un orden
+    SIEMPRE determinista — el mismo orden de precedencia histórico:
+
+        fecha_pasada, fin_de_semana, dia_cerrado, hora_pasada,
+        hora_fuera_de_grilla, excede_cierre_centro, slot_ocupado,
+        fuera_de_jornada, en_colacion
+
+    Ese orden es lo que le permite a `_legacy_desde_conflictos()`
+    tomar `conflictos[0]` como "el motivo ganador legacy" sin
+    necesitar ninguna lógica de precedencia aparte: el primer elemento
+    de la tupla YA es, por construcción, el de mayor precedencia
+    histórica presente.
+
+    RELOJ DETERMINISTA: el chequeo `hora_pasada` compara `hora_obj`
+    contra `ahora` — la hora "actual" INYECTADA por quien llama, nunca
+    `datetime.now()` leído acá dentro. Si `ahora` es `None`
+    (compatibilidad hacia atrás con callers que no la necesitan, p.
+    ej. tests que ya fijan `fecha_obj != hoy`), el chequeo
+    `hora_pasada` simplemente no se evalúa — no se sustituye por una
+    lectura de reloj interna, porque eso reintroduciría exactamente el
+    problema que se corrigió: dos lecturas del reloj en momentos
+    distintos podrían discrepar entre sí. Quien necesite este chequeo
+    debe pasar `ahora` explícitamente (ver `evaluar_disponibilidad_slot()`
+    y `listar_disponibilidad_rango()`, que capturan `datetime.now()`
+    UNA sola vez y reutilizan ese mismo snapshot).
+
+    NO incluye (a propósito, ver docstring del módulo):
+      - `profesional_no_encontrado`, `profesional_inactivo`,
+        `fecha_invalida`, `hora_invalida`: son precondiciones que
+        impiden construir el contexto que esta función recibe
+        (profesional válido, fecha/hora ya parseadas) — son
+        terminales y se resuelven en el wrapper de servicio
+        (`evaluar_disponibilidad_slot()`), nunca acá. Esta función no
+        parsea strings ni hace queries.
+
+    Categorías (deterministas, estables — ver ConflictoSlot):
+      - "precondicion": `fecha_pasada`, `hora_pasada` — validez
+        temporal básica del slot.
+      - "calendario_centro": `fin_de_semana`, `dia_cerrado` — el
+        centro no atiende ese día, sin importar profesional/hora.
+      - "grilla_centro": `hora_fuera_de_grilla`, `excede_cierre_centro`
+        — límites estructurales del centro (grilla cruda / cierre
+        operativo), no de un profesional en particular.
+      - "ocupacion": `slot_ocupado` — otra cita activa ya ocupa el
+        intervalo.
+      - "jornada_profesional": `fuera_de_jornada`, `en_colacion` —
+        únicos códigos con `overridable_con_sobrecupo=True`.
+
+    `bloques_grilla`, igual que antes en `_evaluar_slot_en_contexto()`,
+    evita recalcular `generar_bloques_jornada()` cuando quien llama ya
+    la tiene (`listar_disponibilidad_rango()` la calcula una vez para
+    todo el rango); si se omite, se calcula acá.
+    """
+    conflictos: list[ConflictoSlot] = []
+
+    fecha_iso = fecha_obj.isoformat()
+    hora_hhmm = hora_obj.strftime("%H:%M")
+
+    # ── precondicion: fecha_pasada ──
+    if fecha_obj < hoy:
+        conflictos.append(ConflictoSlot(
+            codigo="fecha_pasada",
+            categoria="precondicion",
+            overridable_con_sobrecupo=False,
+            metadata={"fecha_solicitada": fecha_iso},
+        ))
+
+    # ── calendario_centro: fin_de_semana ──
+    if fecha_obj.weekday() >= 5:
+        conflictos.append(ConflictoSlot(
+            codigo="fin_de_semana",
+            categoria="calendario_centro",
+            overridable_con_sobrecupo=False,
+            metadata={"fecha_solicitada": fecha_iso},
+        ))
+
+    # ── calendario_centro: dia_cerrado ──
+    if dia_cerrado is not None:
+        conflictos.append(ConflictoSlot(
+            codigo="dia_cerrado",
+            categoria="calendario_centro",
+            overridable_con_sobrecupo=False,
+            metadata={
+                "fecha_solicitada": fecha_iso,
+                "motivo_dia_cerrado": dia_cerrado.motivo or None,
+            },
+        ))
+
+    # ── precondicion: hora_pasada ──
+    # Ver "RELOJ DETERMINISTA" arriba: si ahora es None, este chequeo
+    # no se evalúa — nunca se lee el reloj internamente.
+    if ahora is not None and fecha_obj == hoy and hora_obj <= ahora:
+        conflictos.append(ConflictoSlot(
+            codigo="hora_pasada",
+            categoria="precondicion",
+            overridable_con_sobrecupo=False,
+            metadata={"hora_solicitada": hora_hhmm},
+        ))
+
+    duracion = _duracion_efectiva(profesional)
+    bloques = (
+        bloques_grilla
+        if bloques_grilla is not None
+        else generar_bloques_jornada(duracion)
+    )
+
+    # ── grilla_centro: hora_fuera_de_grilla ──
+    # Solo sobre el INICIO, igual que el criterio legacy: no existe
+    # "media cita", así que esto es independiente de cuánto dure el
+    # intervalo.
+    if hora_obj not in bloques:
+        conflictos.append(ConflictoSlot(
+            codigo="hora_fuera_de_grilla",
+            categoria="grilla_centro",
+            overridable_con_sobrecupo=False,
+            metadata={"hora_solicitada": hora_hhmm},
+        ))
+
+    # A partir de acá, igual que antes, se necesita el intervalo
+    # completo [hora_obj, fin_obj) — ver "Hardening de duración
+    # completa (A.2C)" en el docstring del módulo.
+    fin_obj, cruza_medianoche = _fin_intervalo(hora_obj, duracion)
+    fin_hhmm = fin_obj.strftime("%H:%M")
+
+    # ── grilla_centro: excede_cierre_centro ──
+    # Independiente de hora_fuera_de_grilla: el cierre del centro es
+    # un límite del intervalo completo, no del punto de inicio.
+    if cruza_medianoche or fin_obj > HORA_FIN_CENTRO:
+        conflictos.append(ConflictoSlot(
+            codigo="excede_cierre_centro",
+            categoria="grilla_centro",
+            overridable_con_sobrecupo=False,
+            metadata={
+                "inicio_solicitado": hora_hhmm,
+                "fin_solicitado": fin_hhmm,
+                "duracion_min": duracion,
+                "hora_fin_centro": HORA_FIN_CENTRO.strftime("%H:%M"),
+            },
+        ))
+
+    # ── ocupacion: slot_ocupado ──
+    # Independiente de todo lo anterior: otra cita activa puede ocupar
+    # el intervalo sin importar si además excede jornada/cierre.
+    if _hay_solapamiento_con_ocupadas(hora_obj, fin_obj, ocupadas, duracion):
+        conflictos.append(ConflictoSlot(
+            codigo="slot_ocupado",
+            categoria="ocupacion",
+            overridable_con_sobrecupo=False,
+            metadata={
+                "inicio_solicitado": hora_hhmm,
+                "fin_solicitado": fin_hhmm,
+                "duracion_min": duracion,
+            },
+        ))
+
+    # ── jornada_profesional: fuera_de_jornada ──
+    # A diferencia de la cadena legacy original (mutuamente excluyente
+    # con en_colacion por cortocircuito), esto NO se cortocircuita:
+    # ambos se evalúan siempre, para poder devolver los dos si el
+    # intervalo realmente incurre en ambos a la vez.
+    jornada_inicio = _parsear_hora_24h(profesional.horario_inicio)
+    jornada_fin = _parsear_hora_24h(profesional.horario_fin)
+    if jornada_inicio and jornada_fin and (
+        hora_obj < jornada_inicio or fin_obj > jornada_fin
+    ):
+        conflictos.append(ConflictoSlot(
+            codigo="fuera_de_jornada",
+            categoria="jornada_profesional",
+            overridable_con_sobrecupo=True,
+            metadata={
+                "jornada_inicio": jornada_inicio.strftime("%H:%M"),
+                "jornada_fin": jornada_fin.strftime("%H:%M"),
+                "inicio_solicitado": hora_hhmm,
+                "fin_solicitado": fin_hhmm,
+            },
+        ))
+
+    # ── jornada_profesional: en_colacion ──
+    almuerzo_inicio = _parsear_hora_24h(profesional.hora_almuerzo_inicio)
+    almuerzo_fin = _parsear_hora_24h(profesional.hora_almuerzo_fin)
+    if almuerzo_inicio and almuerzo_fin and _intervalos_se_superponen(
+        hora_obj, fin_obj, almuerzo_inicio, almuerzo_fin,
+    ):
+        inicio_conflicto = max(hora_obj, almuerzo_inicio)
+        fin_conflicto = min(fin_obj, almuerzo_fin)
+        minutos_afectados = int(
+            (
+                datetime.combine(date.today(), fin_conflicto)
+                - datetime.combine(date.today(), inicio_conflicto)
+            ).total_seconds()
+            // 60
+        )
+        conflictos.append(ConflictoSlot(
+            codigo="en_colacion",
+            categoria="jornada_profesional",
+            overridable_con_sobrecupo=True,
+            metadata={
+                "inicio_colacion": almuerzo_inicio.strftime("%H:%M"),
+                "fin_colacion": almuerzo_fin.strftime("%H:%M"),
+                "inicio_conflicto": inicio_conflicto.strftime("%H:%M"),
+                "fin_conflicto": fin_conflicto.strftime("%H:%M"),
+                "minutos_afectados": minutos_afectados,
+            },
+        ))
+
+    return tuple(conflictos)
+
+
+def _legacy_desde_conflictos(
+    conflictos: tuple[ConflictoSlot, ...],
+) -> tuple[bool, str | None, str | None, bool]:
+    """
+    Reduce la lista estructurada completa de `analizar_conflictos_slot()`
+    (ya en el orden de precedencia histórico — ver su docstring) al
+    mismo tuple (disponible, motivo, mensaje, overridable_con_sobrecupo)
+    que devolvía `_evaluar_slot_en_contexto()` antes de A.4.2: si la
+    lista está vacía, el slot está disponible; si no, el primer
+    conflicto de la lista es, por construcción, el de mayor precedencia
+    legacy presente, y se traduce a su mensaje exacto de siempre vía
+    `_mensaje_legacy_para()`.
+
+    Usada tanto por `_evaluar_slot_en_contexto()` (que llama a
+    `analizar_conflictos_slot()` y reduce acá) como por
+    `evaluar_disponibilidad_slot()` (que reduce la MISMA tupla que ya
+    calculó para `ResultadoDisponibilidad.conflictos`, sin una segunda
+    llamada al analizador) — una sola reducción, nunca reimplementada
+    dos veces.
+    """
+    if not conflictos:
+        return (True, None, None, False)
+    ganador = conflictos[0]
+    return (
+        False,
+        ganador.codigo,
+        _mensaje_legacy_para(ganador),
+        ganador.overridable_con_sobrecupo,
+    )
+
+
 def _evaluar_slot_en_contexto(
     *,
     profesional: Profesional,
@@ -874,185 +1339,50 @@ def _evaluar_slot_en_contexto(
     dia_cerrado: DiaCerrado | None,
     ocupadas: set[time],
     bloques_grilla: list[time] | None = None,
+    ahora: time | None = None,
 ) -> tuple[bool, str | None, str | None, bool]:
     """
-    Núcleo único de evaluación de UN slot ya parseado (profesional,
-    fecha, hora), sin tocar base de datos: todo el contexto que
-    necesita (profesional, si el día está cerrado, qué horas están
-    ocupadas) ya viene precargado por quien llama.
+    Wrapper delgado sobre `analizar_conflictos_slot()` — A.4.2. Ya NO
+    reimplementa ninguna condición por su cuenta: llama al analizador
+    (la ÚNICA fuente de las reglas de un slot con contexto válido) y
+    reduce su resultado con `_legacy_desde_conflictos()`. Se conserva
+    esta función (en vez de que cada caller llame directo al
+    analizador) porque sigue siendo la usada por
+    `listar_disponibilidad_rango()`, que no necesita la lista completa
+    de conflictos, solo la decisión reducida de siempre.
 
-    Tanto evaluar_disponibilidad_slot() (slot puntual, hace sus
-    propias queries) como listar_disponibilidad_rango() (precarga un
-    rango completo en un puñado de queries) llaman exactamente a esta
-    función para decidir cada slot — ver "Corrección v5" en el
-    docstring del módulo. Ningún otro lugar debe reimplementar esta
-    precedencia.
+    Tanto `evaluar_disponibilidad_slot()` (slot puntual, hace sus
+    propias queries) como `listar_disponibilidad_rango()` (precarga un
+    rango completo en un puñado de queries) terminan apoyándose en el
+    mismo análisis — ver "UNA SOLA FUENTE DE VERDAD" en el docstring
+    del módulo. Ningún otro lugar debe reimplementar esta precedencia.
 
     NO incluye el chequeo de `profesional_inactivo`: en el contrato
     original de evaluar_disponibilidad_slot() (A.2A) ese motivo se
     evalúa ANTES que fecha_invalida/hora_invalida (que son un
     problema de parseo de los parámetros crudos, algo que no existe en
     el camino de rango). Por eso cada llamante lo comprueba una sola
-    vez, con el mismo criterio, antes de invocar este núcleo — ver
-    evaluar_disponibilidad_slot() y listar_disponibilidad_rango().
-    Este núcleo empieza asumiendo que el profesional ya se sabe activo.
+    vez, con el mismo criterio, antes de invocar esta función. Este
+    wrapper empieza asumiendo que el profesional ya se sabe activo.
 
-    `bloques_grilla`, si se entrega, evita recalcular
-    generar_bloques_jornada() por cada slot (listar_disponibilidad_rango
-    ya la calculó una vez para todo el rango). Si se omite, se calcula
-    acá — es el caso de uso de un slot puntual.
+    `bloques_grilla` y `ahora` se reenvían tal cual a
+    `analizar_conflictos_slot()` — ver su docstring, en particular
+    "RELOJ DETERMINISTA": si `ahora` se omite, `hora_pasada` no se
+    evalúa (nunca se sustituye por una lectura de reloj interna).
 
     Devuelve (disponible, motivo, mensaje, overridable_con_sobrecupo).
     """
-    if fecha_obj < hoy:
-        return (
-            False,
-            "fecha_pasada",
-            "No es posible agendar en una fecha que ya pasó.",
-            False,
-        )
-
-    if fecha_obj.weekday() >= 5:
-        return (
-            False,
-            "fin_de_semana",
-            "El centro no atiende los fines de semana.",
-            False,
-        )
-
-    if dia_cerrado:
-        return (
-            False,
-            "dia_cerrado",
-            f"El centro permanece cerrado ese día. {dia_cerrado.motivo or ''}".strip(),
-            False,
-        )
-
-    if fecha_obj == hoy and hora_obj <= datetime.now().time():
-        return (
-            False,
-            "hora_pasada",
-            "Esa hora ya pasó.",
-            False,
-        )
-
-    # La hora debe pertenecer a un bloque real de la grilla del centro
-    # para este profesional (múltiplo de su duracion_min a partir de
-    # HORA_INICIO_CENTRO) — corrección v2 del punto 1. Esto se evalúa
-    # ANTES que jornada/colación (corrección v3, punto 1): un slot que
-    # ni siquiera pertenece a la grilla no es "una hora fuera de
-    # jornada que sobrecupo puede forzar", es un valor que nunca fue
-    # ni será una hora publicable, sin importar la jornada del
-    # profesional. Si se evaluara después de jornada, un valor como
-    # "08:07" (ni alineado NI dentro de jornada) devolvería
-    # "fuera_de_jornada" (overridable) en vez de "hora_fuera_de_grilla"
-    # (no overridable), permitiendo que sobrecupo autorizara un slot
-    # que no existe. Por eso se usa la grilla CRUDA del centro
-    # (generar_bloques_jornada), no la ya filtrada por jornada de
-    # `_bloques_grilla_profesional` (esa sigue siendo correcta para
-    # listar_horas_disponibles, donde sí se quiere solo lo publicable).
-    # No overridable: no existe tal cosa como "media cita"; si algún
-    # día sobrecupo debe poder forzar un horario fuera de grilla, esa
-    # es una decisión de A.4, no un efecto colateral de unificar
-    # disponibilidad. Cuando se llama desde listar_disponibilidad_rango,
-    # `bloques_grilla` ya viene de generar_bloques_jornada, así que esta
-    # comprobación siempre pasa (el slot nació de esa misma grilla) —
-    # se deja igual para que ambos caminos compartan literalmente la
-    # misma condición, sin una rama especial para el caso de rango.
-    duracion = _duracion_efectiva(profesional)
-    bloques = (
-        bloques_grilla
-        if bloques_grilla is not None
-        else generar_bloques_jornada(duracion)
-    )
-    if hora_obj not in bloques:
-        return (
-            False,
-            "hora_fuera_de_grilla",
-            "Esa hora no corresponde a un bloque de atención válido.",
-            False,
-        )
-
-    # ── Hardening de duración completa (A.2C) ──
-    #
-    # A partir de acá se evalúa el INTERVALO SEMIABIERTO completo
-    # [hora_obj, fin_obj) de la cita — fin_obj = hora_obj +
-    # _duracion_efectiva(profesional) — y no solo su instante de
-    # inicio. La pertenencia a la grilla (arriba) sigue evaluándose
-    # solo sobre hora_obj a propósito: no existe "media cita", así que
-    # el INICIO debe seguir alineado a un bloque real; lo que antes no
-    # se comprobaba es que el resto del intervalo respete jornada,
-    # colación, ocupación y el cierre operativo del centro. Ver
-    # objetivo del bloque de hardening en el contexto de continuidad
-    # del proyecto.
-    fin_obj, cruza_medianoche = _fin_intervalo(hora_obj, duracion)
-
-    # Cierre operativo ABSOLUTO del centro: aunque hora_obj pertenezca
-    # a la grilla, el intervalo completo no puede extenderse más allá
-    # de HORA_FIN_CENTRO. A diferencia de "fuera_de_jornada" (que es la
-    # jornada particular de ESTE profesional y sí es overridable), este
-    # es un límite físico del centro mismo — el centro no atiende
-    # después de esa hora sin importar quién pida sobrecupo. Por eso NO
-    # es overridable: el sobrecupo existe para forzar la jornada/
-    # colación de un profesional, nunca para "abrir el centro" más allá
-    # de su cierre (ver "Cierres absolutos" del bloque de hardening).
-    # Semiabierto: un intervalo que termina EXACTAMENTE a
-    # HORA_FIN_CENTRO es válido (no se pide fin_obj <= HORA_FIN_CENTRO
-    # en vez de >, para permitir ese límite exacto — ver "límites
-    # exactos válidos" en las reglas funcionales del hardening).
-    # Se comprueba antes de ocupación/jornada/colación por ser, igual
-    # que hora_fuera_de_grilla, un límite estructural del centro y no
-    # del profesional ni de otra cita.
-    if cruza_medianoche or fin_obj > HORA_FIN_CENTRO:
-        return (
-            False,
-            "excede_cierre_centro",
-            "La duración de la cita excede el horario de atención del centro.",
-            False,
-        )
-
-    # Ocupación (corrección v4, ahora sobre el INTERVALO completo): un
-    # slot ya ocupado por otra cita activa es un bloqueo ABSOLUTO, así
-    # que debe comprobarse ANTES que jornada/colación (que son
-    # overridable_con_sobrecupo=True). Si se comprobara después, un
-    # slot fuera de jornada Y ya ocupado devolvía primero
-    # "fuera_de_jornada" (overridable) y sobrecupo=True lo autorizaba
-    # sin llegar nunca a ver que la hora ya estaba tomada — ver
-    # docstring del módulo, sección "Corrección v4". La política
-    # vigente es: slot ocupado = bloqueo absoluto; fuera de
-    # jornada/colación = temporalmente overridable por sobrecupo. El
-    # orden de evaluación debe reflejar esa jerarquía, no solo el hecho
-    # de que ambos terminan en "no disponible".
-    #
-    # Antes del hardening, "ocupado" comparaba solo la hora de inicio
-    # exacta (hora_obj in ocupadas), así que dos citas con inicios
-    # distintos pero intervalos solapados (p. ej. una existente
-    # 10:00–10:45 y una nueva 09:30–10:15) no se detectaban como
-    # conflicto. Ahora se compara superposición de intervalos
-    # completos. `ocupadas` son horas de inicio de OTRAS citas activas
-    # de este mismo profesional/fecha (ver _horas_ocupadas_normalizadas
-    # y listar_disponibilidad_rango): su duración efectiva es la misma
-    # _duracion_efectiva(profesional) que la del slot que se evalúa,
-    # porque Cita no guarda su propia duración — la única fuente de
-    # duración sigue siendo Profesional.duracion_min (ver diagnóstico
-    # del bloque de hardening); esto no es nuevo, ya era así antes.
-    if _hay_solapamiento_con_ocupadas(hora_obj, fin_obj, ocupadas, duracion):
-        return (
-            False,
-            "slot_ocupado",
-            "Esa hora ya está reservada.",
-            False,
-        )
-
-    disponible, motivo, mensaje, overridable = _evaluar_reglas_jornada(
+    conflictos = analizar_conflictos_slot(
         profesional=profesional,
+        fecha_obj=fecha_obj,
         hora_obj=hora_obj,
-        fin_obj=fin_obj,
+        hoy=hoy,
+        dia_cerrado=dia_cerrado,
+        ocupadas=ocupadas,
+        bloques_grilla=bloques_grilla,
+        ahora=ahora,
     )
-    if not disponible:
-        return (False, motivo, mensaje, overridable)
-
-    return (True, None, None, False)
+    return _legacy_desde_conflictos(conflictos)
 
 
 def evaluar_disponibilidad_slot(
@@ -1074,8 +1404,18 @@ def evaluar_disponibilidad_slot(
 
     Resuelve profesional/fecha/hora desde parámetros crudos y hace sus
     propias queries puntuales; la decisión en sí (a partir de fecha/hora
-    ya parseadas) se delega a _evaluar_slot_en_contexto(), el mismo
-    núcleo que usa listar_disponibilidad_rango() — ver "Corrección v5".
+    ya parseadas) se apoya en analizar_conflictos_slot() — la ÚNICA
+    fuente de las reglas de un slot con contexto válido, ver "UNA SOLA
+    FUENTE DE VERDAD" en el docstring del módulo — y reduce esa MISMA
+    tupla (sin una segunda llamada al analizador) tanto para
+    disponible/motivo/mensaje/overridable_con_sobrecupo como para
+    `ResultadoDisponibilidad.conflictos`.
+
+    RELOJ DETERMINISTA (A.4.2): `datetime.now()` se captura UNA sola
+    vez acá abajo; ese mismo snapshot alimenta el análisis estructurado
+    y, por ser la misma tupla, también la decisión legacy — no hay
+    forma de que ambos discrepen porque el minuto cambió entre dos
+    lecturas del reloj, porque ya no hay dos lecturas.
     """
     profesional = (
         db.query(Profesional)
@@ -1128,6 +1468,11 @@ def evaluar_disponibilidad_slot(
         )
 
     hoy = date.today()
+    # A.4.2 — un solo snapshot del reloj para toda esta evaluación (ver
+    # "RELOJ DETERMINISTA" arriba); nunca se vuelve a leer
+    # datetime.now() más abajo, ni en el análisis estructurado ni en la
+    # reducción legacy.
+    ahora_actual = datetime.now().time()
 
     # Canonicalización (corrección v6, punto 1): las queries de fecha
     # deben usar la forma canónica ya parseada (fecha_canon), no el
@@ -1143,20 +1488,28 @@ def evaluar_disponibilidad_slot(
         db, profesional_id=profesional_id, fecha=fecha_canon,
     )
 
-    disponible, motivo, mensaje, overridable = _evaluar_slot_en_contexto(
+    # A.4.2 — ÚNICA llamada al analizador para esta evaluación: la
+    # misma tupla alimenta tanto la decisión legacy (reducida acá
+    # abajo) como ResultadoDisponibilidad.conflictos. Nunca se vuelve a
+    # llamar analizar_conflictos_slot() una segunda vez para obtener
+    # una u otra por separado.
+    conflictos = analizar_conflictos_slot(
         profesional=profesional,
         fecha_obj=fecha_obj,
         hora_obj=hora_obj,
         hoy=hoy,
         dia_cerrado=dia_cerrado,
         ocupadas=ocupadas,
+        ahora=ahora_actual,
     )
+    disponible, motivo, mensaje, overridable = _legacy_desde_conflictos(conflictos)
     return ResultadoDisponibilidad(
         disponible=disponible,
         motivo=motivo,
         mensaje=mensaje,
         overridable_con_sobrecupo=overridable,
         profesional=profesional,
+        conflictos=conflictos,
     )
 
 
@@ -1395,6 +1748,11 @@ def listar_disponibilidad_rango(
     bloques_grilla = generar_bloques_jornada(duracion)
 
     hoy = date.today()
+    # A.4.2 — mismo patrón que `hoy`: un solo snapshot del reloj para
+    # todo el rango (no uno por slot ni por día), reutilizado en cada
+    # llamada a _evaluar_slot_en_contexto() de abajo — ver "RELOJ
+    # DETERMINISTA" en el docstring del módulo.
+    ahora_actual = datetime.now().time()
     dias_resultado: list[dict] = []
     fecha_actual = fecha_inicio_obj
     while fecha_actual <= fecha_fin_obj:
@@ -1421,6 +1779,7 @@ def listar_disponibilidad_rango(
                     hoy=hoy,
                     dia_cerrado=dia_cerrado,
                     ocupadas=ocupadas,
+                    ahora=ahora_actual,
                     bloques_grilla=bloques_grilla,
                 )
             slots.append({

@@ -27,6 +27,8 @@ from app.services.agenda_disponibilidad_service import (
     excede_ventana_agendamiento_estudiante,
     adquirir_lock_agenda_profesional_fecha,
     canonicalizar_fecha_valida,
+    hay_bloqueo_absoluto,
+    ConflictoSlot,
     SlotInvalidoError,
 )
 from app.services.cita_origen_service import resolver_origen_cita
@@ -339,10 +341,28 @@ def crear_cita(
     # app.models.cita_sobrecupo.CitaSobrecupo.
     motivo_conflicto_superado: str | None = None
     if not resultado_disponibilidad.disponible:
+        # A.4.2 — mismo criterio de siempre (overridable_con_sobrecupo,
+        # el motivo ganador de la precedencia legacy) MÁS el chequeo
+        # explícito sobre la lista estructurada completa: si cualquier
+        # conflicto real y determinable del slot es un bloqueo
+        # absoluto, el sobrecupo actual no puede autorizarse, sin
+        # importar cuántos conflictos overridables lo acompañen.
+        #
+        # Estas dos condiciones son equivalentes en este punto del
+        # código (resultado_disponibilidad viene de un slot con
+        # contexto ya analizable — ver el invariante documentado en
+        # hay_bloqueo_absoluto()), pero se comprueban AMBAS
+        # explícitamente a propósito: esa equivalencia NO es universal
+        # sobre cualquier ResultadoDisponibilidad (los motivos
+        # terminales de evaluar_disponibilidad_slot() pueden traer
+        # conflictos=() con overridable_con_sobrecupo=False), así que
+        # no debilitar esta condición asumiendo que una sola de las
+        # dos alcanza siempre.
         sobrecupo_autoriza = (
             puede_gestionar_agenda
             and bool(cita.sobrecupo)
             and resultado_disponibilidad.overridable_con_sobrecupo
+            and not hay_bloqueo_absoluto(resultado_disponibilidad.conflictos)
         )
         if not sobrecupo_autoriza:
             # A.3 — "slot_ocupado" tras la re-evaluación DENTRO del
@@ -485,10 +505,37 @@ def crear_cita(
         )
         db.add(detalle_sobrecupo)
         db.flush()
-        db.add(CitaSobrecupoConflicto(
-            cita_sobrecupo_id=detalle_sobrecupo.id,
-            codigo=motivo_conflicto_superado,
-        ))
+        # A.4.2 — una fila de CitaSobrecupoConflicto POR CADA conflicto
+        # estructurado que este sobrecupo realmente superó, no solo el
+        # motivo ganador de la precedencia legacy. `sobrecupo_autoriza`
+        # ya garantizó arriba (vía hay_bloqueo_absoluto) que ningún
+        # conflicto de esta lista es un bloqueo absoluto, así que cada
+        # uno de ellos es, por definición, overridable y fue
+        # efectivamente superado por este sobrecupo — nunca se persiste
+        # acá un conflicto absoluto como si hubiera sido superado.
+        #
+        # Red de seguridad (no debería ocurrir dado el análisis
+        # estructurado de A.4.2): si por algún motivo la lista
+        # estructurada llegara vacía pese a existir un motivo ganador
+        # overridable, se conserva al menos ese único motivo — el
+        # mismo comportamiento que ya tenía A.4.1 — para no perder la
+        # trazabilidad del sobrecupo. El mensaje de auditoría de abajo
+        # sigue usando únicamente `motivo_conflicto_superado` (el
+        # motivo ganador legacy) sin cambios respecto a A.4.1 — no se
+        # enumeran acá los conflictos adicionales.
+        conflictos_superados = resultado_disponibilidad.conflictos or (
+            motivo_conflicto_superado,
+        )
+        for conflicto in conflictos_superados:
+            codigo = (
+                conflicto.codigo
+                if isinstance(conflicto, ConflictoSlot)
+                else conflicto
+            )
+            db.add(CitaSobrecupoConflicto(
+                cita_sobrecupo_id=detalle_sobrecupo.id,
+                codigo=codigo,
+            ))
         registrar_evento_auditoria(
             db, current_user, "Creó cita con sobrecupo",
             entidad="cita", entidad_id=nueva.id,
