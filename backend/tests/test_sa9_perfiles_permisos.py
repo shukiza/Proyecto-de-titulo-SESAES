@@ -39,6 +39,9 @@ def test_administradores_pueden_recibir_lectura_gestion_y_reportes(perfil):
     assert Permission.PROFESIONALES_GESTIONAR in permisos
     assert Permission.AGENDA_VER in permisos
     assert Permission.AGENDA_GESTIONAR in permisos
+    # A.4.3 — capacidad distinta de AGENDA_GESTIONAR, en el TECHO de
+    # los mismos perfiles que ya podían gestionar agenda.
+    assert Permission.AGENDA_SOBRECUPO in permisos
     assert Permission.REPORTES_VER in permisos
 
 
@@ -57,6 +60,11 @@ def test_secretarias_solo_tienen_techo_operativo(perfil):
         Permission.PROFESIONALES_VER,
         Permission.AGENDA_VER,
         Permission.AGENDA_GESTIONAR,
+        # A.4.3 — techo != concesión (ver test_sa9_migracion_permisos_admin
+        # / SA-9 en general): que el techo lo permita no le da la
+        # capacidad a ninguna cuenta secretaría existente sin una fila
+        # AccesoAdminPermiso explícita.
+        Permission.AGENDA_SOBRECUPO,
     }
 
 

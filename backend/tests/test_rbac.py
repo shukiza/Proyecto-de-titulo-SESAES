@@ -64,8 +64,10 @@ class RoleDefaultPermissionsTests(unittest.TestCase):
     def test_los_cuatro_roles_estan_definidos(self):
         self.assertEqual(set(ROLE_DEFAULT_PERMISSIONS.keys()), set(Role))
 
-    def test_catalogo_tiene_20_permisos(self):
-        self.assertEqual(len(list(Permission)), 20)
+    def test_catalogo_tiene_21_permisos(self):
+        # A.4.3 — 20 (Fase 3.1) + Permission.AGENDA_SOBRECUPO, capacidad
+        # distinta de AGENDA_GESTIONAR (ver sobrecupo_policy_service).
+        self.assertEqual(len(list(Permission)), 21)
 
     def test_ningun_rol_tiene_permisos_duplicados_ni_desconocidos(self):
         for permisos in ROLE_DEFAULT_PERMISSIONS.values():

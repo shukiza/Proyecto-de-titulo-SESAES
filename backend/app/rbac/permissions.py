@@ -52,6 +52,11 @@ class Permission(str, enum.Enum):
     PROFESIONALES_GESTIONAR = "profesionales.gestionar"
     AGENDA_VER = "agenda.ver"
     AGENDA_GESTIONAR = "agenda.gestionar"
+    # A.4.3 — capacidad DISTINTA de AGENDA_GESTIONAR a propósito: poder
+    # gestionar una agenda (crear/mover/cancelar citas normales) no
+    # implica automáticamente poder forzar un sobrecupo sobre un
+    # conflicto real. Ver app.services.sobrecupo_policy_service.
+    AGENDA_SOBRECUPO = "agenda.sobrecupo"
     CONFIGURACION_GESTIONAR = "configuracion.gestionar"
     REPORTES_VER = "reportes.ver"
     REPORTES_CGR_EXPORTAR = "reportes.cgr.exportar"
@@ -87,6 +92,13 @@ ROLE_DEFAULT_PERMISSIONS: Dict[Role, FrozenSet[Permission]] = {
             Permission.PROFESIONALES_GESTIONAR,
             Permission.AGENDA_VER,
             Permission.AGENDA_GESTIONAR,
+            # A.4.3 — explícito, igual que el resto de esta lista: NO es
+            # un atajo "SUPERADMIN puede forzar sobrecupo por ser
+            # superadmin". La política de sobrecupo SIEMPRE resuelve
+            # esto vía tiene_permiso_efectivo(), que para SUPERADMIN cae
+            # en has_permission() contra esta misma tabla explícita — el
+            # mismo mecanismo que ya rige AGENDA_GESTIONAR arriba.
+            Permission.AGENDA_SOBRECUPO,
             Permission.CONFIGURACION_GESTIONAR,
             Permission.REPORTES_VER,
             Permission.REPORTES_CGR_EXPORTAR,

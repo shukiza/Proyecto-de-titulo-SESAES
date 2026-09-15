@@ -188,6 +188,11 @@ PERMISOS_ADMIN_OPERATIVOS = frozenset(
         Permission.PROFESIONALES_GESTIONAR,
         Permission.AGENDA_VER,
         Permission.AGENDA_GESTIONAR,
+        # A.4.3 — techo, no concesión: que el catálogo lo permita NO
+        # significa que ninguna cuenta lo tenga ya asignado. Ver
+        # PERFIL_PERMISOS_PERMITIDOS más abajo y el flujo SA-9 de
+        # asignación explícita.
+        Permission.AGENDA_SOBRECUPO,
         Permission.REPORTES_VER,
     }
 )
@@ -215,6 +220,12 @@ PERMISOS_NO_ADMINISTRATIVOS = frozenset(
     }
 )
 
+# A.4.3 — AGENDA_SOBRECUPO se agrega al TECHO de los cuatro perfiles
+# porque los cuatro ya incluyen AGENDA_GESTIONAR (ninguno de los
+# perfiles actuales es de solo lectura de agenda). Técho != concesión:
+# ninguna cuenta ADMIN existente recibe una fila AccesoAdminPermiso
+# nueva por este cambio — sigue exigiendo asignación explícita vía
+# SA-9 (ver validar_permisos_para_perfil()/endpoint de asignación).
 PERFIL_PERMISOS_PERMITIDOS = {
     PerfilAccesoAdmin.ADMINISTRADOR_GENERAL: frozenset(
         {
@@ -224,6 +235,7 @@ PERFIL_PERMISOS_PERMITIDOS = {
             Permission.PROFESIONALES_GESTIONAR,
             Permission.AGENDA_VER,
             Permission.AGENDA_GESTIONAR,
+            Permission.AGENDA_SOBRECUPO,
             Permission.REPORTES_VER,
         }
     ),
@@ -235,6 +247,7 @@ PERFIL_PERMISOS_PERMITIDOS = {
             Permission.PROFESIONALES_GESTIONAR,
             Permission.AGENDA_VER,
             Permission.AGENDA_GESTIONAR,
+            Permission.AGENDA_SOBRECUPO,
             Permission.REPORTES_VER,
         }
     ),
@@ -244,6 +257,7 @@ PERFIL_PERMISOS_PERMITIDOS = {
             Permission.PROFESIONALES_VER,
             Permission.AGENDA_VER,
             Permission.AGENDA_GESTIONAR,
+            Permission.AGENDA_SOBRECUPO,
         }
     ),
     PerfilAccesoAdmin.SECRETARIA_ESPECIALIDAD: frozenset(
@@ -252,6 +266,7 @@ PERFIL_PERMISOS_PERMITIDOS = {
             Permission.PROFESIONALES_VER,
             Permission.AGENDA_VER,
             Permission.AGENDA_GESTIONAR,
+            Permission.AGENDA_SOBRECUPO,
         }
     ),
 }

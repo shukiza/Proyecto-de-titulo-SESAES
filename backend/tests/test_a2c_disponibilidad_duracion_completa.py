@@ -44,7 +44,9 @@ from app.models.cita import Cita
 from app.models.profesional import Profesional
 from app.models.usuario import Usuario
 from app.rbac.admin_authorization import AlcanceAdministrativoEfectivo
+from app.rbac.permissions import Permission
 from app.routers import citas
+import app.services.sobrecupo_policy_service as sobrecupo_policy_service
 from app.schemas import CitaCreate
 from app.services.agenda_disponibilidad_service import (
     evaluar_disponibilidad_slot,
@@ -130,15 +132,33 @@ def _cita(db, *, estudiante_id, profesional_id, fecha, hora, estado="pendiente",
     return cita
 
 
-def _monkeypatch_admin_institucional(monkeypatch, modulo):
-    monkeypatch.setattr(modulo, "tiene_permiso_efectivo", lambda db, u, p: True)
-    monkeypatch.setattr(
-        modulo,
-        "obtener_alcance_administrativo_efectivo",
-        lambda db, u: AlcanceAdministrativoEfectivo(
-            institucional=True, especialidades_normalizadas=frozenset(),
-        ),
-    )
+def _monkeypatch_admin_institucional(
+    monkeypatch, *modulos, gestionar: bool = True, sobrecupo: bool = True,
+):
+    """A.4.3 — mismo criterio que test_a2_disponibilidad_real.py: nunca
+    devuelve True para cualquier permiso, solo resuelve explícitamente
+    agenda.gestionar/agenda.sobrecupo (la política de sobrecupo los
+    consulta en su propio namespace, aparte de citas.py)."""
+    def _resolver(db, current_user, permiso):
+        if permiso == Permission.AGENDA_GESTIONAR:
+            return gestionar
+        if permiso == Permission.AGENDA_SOBRECUPO:
+            return sobrecupo
+        raise AssertionError(
+            f"_monkeypatch_admin_institucional no contempla el permiso {permiso!r}"
+        )
+
+    for modulo in modulos:
+        if hasattr(modulo, "tiene_permiso_efectivo"):
+            monkeypatch.setattr(modulo, "tiene_permiso_efectivo", _resolver)
+        if hasattr(modulo, "obtener_alcance_administrativo_efectivo"):
+            monkeypatch.setattr(
+                modulo,
+                "obtener_alcance_administrativo_efectivo",
+                lambda db, u: AlcanceAdministrativoEfectivo(
+                    institucional=True, especialidades_normalizadas=frozenset(),
+                ),
+            )
 
 
 # ──────────────────────────────────────────────────────────
@@ -522,7 +542,7 @@ def test_sobrecupo_admin_supera_invasion_de_colacion_detectada_por_intervalo(db_
     est = _estudiante(db_session)
     db_session.commit()
 
-    _monkeypatch_admin_institucional(monkeypatch, citas)
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=est.id,
@@ -530,6 +550,8 @@ def test_sobrecupo_admin_supera_invasion_de_colacion_detectada_por_intervalo(db_
         fecha=_dia_habil_futuro(),
         hora="12:30",  # 12:30–13:00: invade la colación 12:45–13:45
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con turno de práctica que termina justo antes",
     )
 
     resultado = citas.crear_cita(cita=payload, db=db_session, current_user={"id": 999, "rol": "admin"})

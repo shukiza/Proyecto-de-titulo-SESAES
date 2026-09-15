@@ -115,6 +115,11 @@ def test_catalogo_expone_techo_real_por_perfil_sin_permisos_reservados():
         Permission.PROFESIONALES_VER.value,
         Permission.AGENDA_VER.value,
         Permission.AGENDA_GESTIONAR.value,
+        # A.4.3 — agenda.sobrecupo se agrega al TECHO de este perfil
+        # (ya tenía agenda.gestionar): techo != concesión, ninguna
+        # cuenta existente recibe la fila AccesoAdminPermiso solo por
+        # este cambio.
+        Permission.AGENDA_SOBRECUPO.value,
     }
 
     todos = {

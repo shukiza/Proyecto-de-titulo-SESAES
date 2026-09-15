@@ -56,9 +56,11 @@ from app.models.dia_cerrado import DiaCerrado
 from app.models.profesional import Profesional
 from app.models.usuario import Usuario
 from app.rbac.admin_authorization import AlcanceAdministrativoEfectivo
+from app.rbac.permissions import Permission
 from app.routers import admin, citas
 from app.schemas import CitaCreate
 import app.services.agenda_disponibilidad_service as agenda_disponibilidad_service
+import app.services.sobrecupo_policy_service as sobrecupo_policy_service
 from app.services.agenda_disponibilidad_service import (
     VENTANA_AGENDAMIENTO_ESTUDIANTE_DIAS,
     evaluar_disponibilidad_slot,
@@ -173,15 +175,41 @@ def _current_user_estudiante(est):
     return {"id": est.id, "rol": "estudiante"}
 
 
-def _monkeypatch_admin_institucional(monkeypatch, modulo):
-    monkeypatch.setattr(modulo, "tiene_permiso_efectivo", lambda db, u, p: True)
-    monkeypatch.setattr(
-        modulo,
-        "obtener_alcance_administrativo_efectivo",
-        lambda db, u: AlcanceAdministrativoEfectivo(
-            institucional=True, especialidades_normalizadas=frozenset(),
-        ),
-    )
+def _monkeypatch_admin_institucional(
+    monkeypatch, *modulos, gestionar: bool = True, sobrecupo: bool = True,
+):
+    """
+    A.4.3 — generalizado para poder distinguir explícitamente
+    agenda.gestionar de agenda.sobrecupo (la política central de
+    sobrecupo resuelve ambos permisos por su cuenta, en su propio
+    namespace — patchear solo `citas.tiene_permiso_efectivo` ya no
+    alcanza para los tests que crean un sobrecupo efectivo). Nunca
+    devuelve True para CUALQUIER permiso: solo resuelve estos dos
+    explícitamente, y falla ruidosamente (AssertionError) si algún
+    código bajo prueba llegara a consultar un tercer permiso que este
+    helper no contempla — mejor eso que un mock demasiado permisivo
+    ocultando una regresión.
+    """
+    def _resolver(db, current_user, permiso):
+        if permiso == Permission.AGENDA_GESTIONAR:
+            return gestionar
+        if permiso == Permission.AGENDA_SOBRECUPO:
+            return sobrecupo
+        raise AssertionError(
+            f"_monkeypatch_admin_institucional no contempla el permiso {permiso!r}"
+        )
+
+    for modulo in modulos:
+        if hasattr(modulo, "tiene_permiso_efectivo"):
+            monkeypatch.setattr(modulo, "tiene_permiso_efectivo", _resolver)
+        if hasattr(modulo, "obtener_alcance_administrativo_efectivo"):
+            monkeypatch.setattr(
+                modulo,
+                "obtener_alcance_administrativo_efectivo",
+                lambda db, u: AlcanceAdministrativoEfectivo(
+                    institucional=True, especialidades_normalizadas=frozenset(),
+                ),
+            )
 
 
 # ──────────────────────────────────────────────────────────
@@ -467,14 +495,7 @@ def test_crear_cita_sobrecupo_permite_hora_alineada_fuera_de_jornada(db_session,
     est = _estudiante(db_session)
     db_session.commit()
 
-    monkeypatch.setattr(citas, "tiene_permiso_efectivo", lambda db, u, p: True)
-    monkeypatch.setattr(
-        citas,
-        "obtener_alcance_administrativo_efectivo",
-        lambda db, u: AlcanceAdministrativoEfectivo(
-            institucional=True, especialidades_normalizadas=frozenset(),
-        ),
-    )
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=est.id,
@@ -482,6 +503,8 @@ def test_crear_cita_sobrecupo_permite_hora_alineada_fuera_de_jornada(db_session,
         fecha=_dia_habil_futuro(),
         hora="08:00",
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con examen médico justo antes",
     )
 
     resultado = citas.crear_cita(cita=payload, db=db_session, current_user={"id": 999, "rol": "admin"})
@@ -1085,7 +1108,7 @@ def test_sobrecupo_admin_supera_fuera_de_jornada(db_session, monkeypatch):
     est = _estudiante(db_session)
     db_session.commit()
 
-    _monkeypatch_admin_institucional(monkeypatch, citas)
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=est.id,
@@ -1093,6 +1116,8 @@ def test_sobrecupo_admin_supera_fuera_de_jornada(db_session, monkeypatch):
         fecha=_dia_habil_futuro(),
         hora="08:00",
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con examen médico justo antes",
     )
 
     resultado = citas.crear_cita(
@@ -1257,7 +1282,7 @@ def test_sobrecupo_admin_supera_fuera_de_jornada_cuando_slot_libre(db_session, m
     est = _estudiante(db_session, correo="libre-router@sesaes.cl", rut="7-7")
     db_session.commit()
 
-    _monkeypatch_admin_institucional(monkeypatch, citas)
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=est.id,
@@ -1265,6 +1290,8 @@ def test_sobrecupo_admin_supera_fuera_de_jornada_cuando_slot_libre(db_session, m
         fecha=fecha,
         hora="08:00",
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con examen médico justo antes",
     )
 
     resultado = citas.crear_cita(

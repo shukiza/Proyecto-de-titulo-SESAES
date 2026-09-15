@@ -84,9 +84,11 @@ from app.models.dia_cerrado import DiaCerrado
 from app.models.profesional import Profesional
 from app.models.usuario import Usuario
 from app.rbac.admin_authorization import AlcanceAdministrativoEfectivo
+from app.rbac.permissions import Permission
 from app.routers import citas
 from app.schemas import CitaCreate
 import app.services.agenda_disponibilidad_service as agenda_disponibilidad_service
+import app.services.sobrecupo_policy_service as sobrecupo_policy_service
 from app.services.agenda_disponibilidad_service import (
     ConflictoSlot,
     analizar_conflictos_slot,
@@ -203,16 +205,33 @@ def _current_user(usuario):
     return {"id": usuario.id, "rol": usuario.rol}
 
 
-def _monkeypatch_admin_institucional(monkeypatch, modulo):
-    if hasattr(modulo, "tiene_permiso_efectivo"):
-        monkeypatch.setattr(modulo, "tiene_permiso_efectivo", lambda db, u, p: True)
-    monkeypatch.setattr(
-        modulo,
-        "obtener_alcance_administrativo_efectivo",
-        lambda db, u: AlcanceAdministrativoEfectivo(
-            institucional=True, especialidades_normalizadas=frozenset(),
-        ),
-    )
+def _monkeypatch_admin_institucional(
+    monkeypatch, *modulos, gestionar: bool = True, sobrecupo: bool = True,
+):
+    """A.4.3 — mismo criterio que las demás suites: nunca devuelve True
+    para cualquier permiso, solo resuelve explícitamente
+    agenda.gestionar/agenda.sobrecupo (la política de sobrecupo los
+    consulta en su propio namespace, aparte de citas.py)."""
+    def _resolver(db, current_user, permiso):
+        if permiso == Permission.AGENDA_GESTIONAR:
+            return gestionar
+        if permiso == Permission.AGENDA_SOBRECUPO:
+            return sobrecupo
+        raise AssertionError(
+            f"_monkeypatch_admin_institucional no contempla el permiso {permiso!r}"
+        )
+
+    for modulo in modulos:
+        if hasattr(modulo, "tiene_permiso_efectivo"):
+            monkeypatch.setattr(modulo, "tiene_permiso_efectivo", _resolver)
+        if hasattr(modulo, "obtener_alcance_administrativo_efectivo"):
+            monkeypatch.setattr(
+                modulo,
+                "obtener_alcance_administrativo_efectivo",
+                lambda db, u: AlcanceAdministrativoEfectivo(
+                    institucional=True, especialidades_normalizadas=frozenset(),
+                ),
+            )
 
 
 def _codigos(conflictos):
@@ -868,11 +887,13 @@ def test_sobrecupo_con_un_conflicto_persiste_una_fila(db_session, monkeypatch):
     admin_user = _usuario(db_session, correo="admin-1conf-a42@sesaes.cl", rol="admin", rut="a42-2")
     db_session.commit()
 
-    _monkeypatch_admin_institucional(monkeypatch, citas)
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=paciente.id, profesional_id=prof.id, fecha=fecha, hora="13:00",
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con turno de práctica que termina justo antes",
     )
     citas.crear_cita(cita=payload, db=db_session, current_user=_current_user(admin_user))
 
@@ -898,11 +919,13 @@ def test_sobrecupo_con_dos_conflictos_persiste_dos_filas(db_session, monkeypatch
     admin_user = _usuario(db_session, correo="admin-2conf-a42@sesaes.cl", rol="admin", rut="a42-4")
     db_session.commit()
 
-    _monkeypatch_admin_institucional(monkeypatch, citas)
+    _monkeypatch_admin_institucional(monkeypatch, citas, sobrecupo_policy_service)
 
     payload = CitaCreate(
         estudiante_id=paciente.id, profesional_id=prof.id, fecha=fecha, hora="12:30",
         sobrecupo=True,
+        # A.4.3 — sobrecupo efectivo ahora exige motivo humano no vacío.
+        sobrecupo_motivo="Paciente con turno de práctica que termina justo antes",
     )
     citas.crear_cita(cita=payload, db=db_session, current_user=_current_user(admin_user))
 

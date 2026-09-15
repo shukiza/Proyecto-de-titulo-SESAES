@@ -27,11 +27,22 @@ from app.services.agenda_disponibilidad_service import (
     excede_ventana_agendamiento_estudiante,
     adquirir_lock_agenda_profesional_fecha,
     canonicalizar_fecha_valida,
-    hay_bloqueo_absoluto,
     ConflictoSlot,
     SlotInvalidoError,
 )
 from app.services.cita_origen_service import resolver_origen_cita
+# A.4.3 — política central de sobrecupo: reemplaza el `if` compuesto
+# que antes vivía acá mismo (puede_gestionar_agenda AND cita.sobrecupo
+# AND overridable AND NOT hay_bloqueo_absoluto(...)). citas.py ya NO
+# importa hay_bloqueo_absoluto/tiene_permiso_efectivo para decidir
+# sobrecupo — eso quedó encapsulado en el servicio (sí sigue usando
+# tiene_permiso_efectivo para _puede_gestionar_agenda(), que es un
+# chequeo de propiedad/alcance distinto, no de sobrecupo).
+from app.services.sobrecupo_policy_service import (
+    CODIGO_DENEGADO_SIN_MOTIVO,
+    CODIGO_DENEGADO_SIN_PERMISO,
+    evaluar_politica_sobrecupo,
+)
 
 router = APIRouter(tags=["citas"])
 
@@ -57,6 +68,52 @@ def _puede_gestionar_agenda(
         current_user,
         Permission.AGENDA_GESTIONAR,
     )
+
+
+def _mapear_denegacion_sobrecupo(decision, resultado_disponibilidad) -> dict:
+    """
+    A.4.3 — único lugar que traduce un `DecisionSobrecupo` denegado
+    (transport-agnostic, ver app.services.sobrecupo_policy_service) a
+    un status/detail HTTP concreto. Devuelve un dict pensado para
+    `HTTPException(**resultado)`.
+
+    Preserva EXACTAMENTE el status/mensaje legacy para los rechazos que
+    ya existían antes de A.4.3 (precondición terminal, bloqueo
+    absoluto, conflicto sin intención — incluida la rama en que el
+    actor ni siquiera tiene agenda.gestionar, que la política también
+    devuelve con este mismo código para no filtrar la existencia de
+    agenda.sobrecupo a quien no puede ejercerla). Solo introduce
+    status/detail NUEVOS para los dos códigos que A.4.3 agrega de
+    verdad: falta de permiso específico y falta de motivo humano.
+    """
+    if decision.codigo == CODIGO_DENEGADO_SIN_PERMISO:
+        return {
+            "status_code": 403,
+            "detail": (
+                "No cuentas con el permiso de sobrecupo "
+                "(agenda.sobrecupo) para autorizar esta hora."
+            ),
+        }
+
+    if decision.codigo == CODIGO_DENEGADO_SIN_MOTIVO:
+        return {
+            "status_code": 400,
+            "detail": "Debes indicar el motivo del sobrecupo.",
+        }
+
+    # denegado_precondicion_legacy / denegado_bloqueo_absoluto /
+    # denegado_conflicto_sin_intencion / denegado_entrada_incoherente
+    # (fail-closed defensivo) — mismo criterio legacy de siempre:
+    # slot_ocupado tras la re-evaluación DENTRO del lock es, por
+    # definición, perder la carrera de concurrencia (409); el resto de
+    # los motivos son problemas de validez del slot en sí (400).
+    status_code = (
+        409 if resultado_disponibilidad.motivo == "slot_ocupado" else 400
+    )
+    return {
+        "status_code": status_code,
+        "detail": resultado_disponibilidad.mensaje or "Esa hora no está disponible.",
+    }
 
 
 def _verificar_propietario_o_agenda(
@@ -332,57 +389,39 @@ def crear_cita(
         fecha=fecha_canon,
         hora=cita.hora,
     )
-    # A.4.1 — motivo estructurado REALMENTE superado, si lo hay. Solo se
-    # llena cuando evaluar_disponibilidad_slot() encontró un motivo
-    # overridable y sobrecupo lo autorizó — nunca se inventa un
-    # "conflicto" para el caso (posible, si alguien llama a la API
-    # directamente con sobrecupo=True sobre un slot que ya estaba
-    # libre) en que no hubo nada real que superar. Ver
-    # app.models.cita_sobrecupo.CitaSobrecupo.
-    motivo_conflicto_superado: str | None = None
-    if not resultado_disponibilidad.disponible:
-        # A.4.2 — mismo criterio de siempre (overridable_con_sobrecupo,
-        # el motivo ganador de la precedencia legacy) MÁS el chequeo
-        # explícito sobre la lista estructurada completa: si cualquier
-        # conflicto real y determinable del slot es un bloqueo
-        # absoluto, el sobrecupo actual no puede autorizarse, sin
-        # importar cuántos conflictos overridables lo acompañen.
-        #
-        # Estas dos condiciones son equivalentes en este punto del
-        # código (resultado_disponibilidad viene de un slot con
-        # contexto ya analizable — ver el invariante documentado en
-        # hay_bloqueo_absoluto()), pero se comprueban AMBAS
-        # explícitamente a propósito: esa equivalencia NO es universal
-        # sobre cualquier ResultadoDisponibilidad (los motivos
-        # terminales de evaluar_disponibilidad_slot() pueden traer
-        # conflictos=() con overridable_con_sobrecupo=False), así que
-        # no debilitar esta condición asumiendo que una sola de las
-        # dos alcanza siempre.
-        sobrecupo_autoriza = (
-            puede_gestionar_agenda
-            and bool(cita.sobrecupo)
-            and resultado_disponibilidad.overridable_con_sobrecupo
-            and not hay_bloqueo_absoluto(resultado_disponibilidad.conflictos)
+    # A.4.3 — política central de sobrecupo (ver
+    # app.services.sobrecupo_policy_service): reemplaza el `if`
+    # compuesto que antes vivía acá mismo. La política recibe el
+    # `resultado_disponibilidad` YA calculado arriba, DENTRO del lock
+    # A.3 — nunca reanaliza disponibilidad ni reimplementa ninguna
+    # regla de conflicto de A.4.2 (usa hay_bloqueo_absoluto() /
+    # ConflictoSlot.overridable_con_sobrecupo internamente).
+    decision_sobrecupo = evaluar_politica_sobrecupo(
+        db,
+        current_user,
+        sobrecupo_solicitado=bool(cita.sobrecupo),
+        sobrecupo_motivo=cita.sobrecupo_motivo,
+        resultado_disponibilidad=resultado_disponibilidad,
+    )
+
+    if not decision_sobrecupo.permitido:
+        raise HTTPException(
+            **_mapear_denegacion_sobrecupo(
+                decision_sobrecupo, resultado_disponibilidad,
+            )
         )
-        if not sobrecupo_autoriza:
-            # A.3 — "slot_ocupado" tras la re-evaluación DENTRO del
-            # lock es, por definición, perder la carrera (alguien más
-            # ocupó ese intervalo, ya sea justo ahora o antes de que
-            # esta petición llegara): 409 Conflict, no 400. El resto de
-            # los motivos (fuera de jornada, en colación, fuera de
-            # grilla, día cerrado, etc.) son problemas de validez del
-            # slot en sí, no de concurrencia, y mantienen 400 — no se
-            # convierte automáticamente en sobrecupo en ningún caso.
-            status_code = (
-                409
-                if resultado_disponibilidad.motivo == "slot_ocupado"
-                else 400
-            )
-            raise HTTPException(
-                status_code=status_code,
-                detail=resultado_disponibilidad.mensaje or "Esa hora no está disponible.",
-            )
-        motivo_conflicto_superado = resultado_disponibilidad.motivo
+
+    # A.4.1 — motivo estructurado REALMENTE superado, si lo hay. Solo se
+    # llena cuando la política de arriba autorizó un sobrecupo EFECTIVO
+    # — nunca se inventa un "conflicto" para el caso (posible, si
+    # alguien llama a la API directamente con sobrecupo=True sobre un
+    # slot que ya estaba libre) en que no hubo nada real que superar.
+    # Ver app.models.cita_sobrecupo.CitaSobrecupo.
+    motivo_conflicto_superado: str | None = (
+        resultado_disponibilidad.motivo
+        if decision_sobrecupo.es_sobrecupo_efectivo
+        else None
+    )
 
     if prof:
         # Una cita "pendiente" solo debe bloquear un nuevo agendamiento si
@@ -496,11 +535,13 @@ def crear_cita(
     if motivo_conflicto_superado is not None:
         detalle_sobrecupo = CitaSobrecupo(
             cita_id=nueva.id,
-            # sobrecupo_motivo todavía no lo envía el frontend actual
-            # (ver CitaCreate.sobrecupo_motivo) — queda NULL hasta que
-            # A.4.7 actualice el modal de Angular. No se exige acá
-            # para no romper el flujo existente.
-            motivo=cita.sobrecupo_motivo,
+            # A.4.3 — motivo YA validado/trim por la política
+            # (DecisionSobrecupo.motivo_normalizado): nunca None ni
+            # vacío en este punto, porque `es_sobrecupo_efectivo=True`
+            # solo ocurre en CODIGO_AUTORIZADO, que exige motivo no
+            # vacío. El router no vuelve a hacer strip()/validación acá
+            # — persiste EXACTAMENTE ese valor.
+            motivo=decision_sobrecupo.motivo_normalizado,
             estado_revision=None,
         )
         db.add(detalle_sobrecupo)
