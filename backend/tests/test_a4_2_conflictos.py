@@ -390,10 +390,44 @@ def test_slot_ocupado_aislado(db_session):
 
     assert _codigos(conflictos) == ["slot_ocupado"]
     assert conflictos[0].categoria == "ocupacion"
-    assert conflictos[0].overridable_con_sobrecupo is False
+    # A.4.4 — con exactamente 1 cita activa existente en el intervalo,
+    # todavía queda capacidad para un sobrecupo intencional (máximo 2
+    # simultáneas): overridable_con_sobrecupo ahora es True. Con 2+
+    # ocupaciones existentes sería False — ver
+    # test_slot_ocupado_capacidad_agotada_no_es_overridable.
+    assert conflictos[0].overridable_con_sobrecupo is True
     metadata = conflictos[0].metadata
-    assert set(metadata.keys()) == {"inicio_solicitado", "fin_solicitado", "duracion_min"}
+    assert set(metadata.keys()) == {
+        "inicio_solicitado", "fin_solicitado", "duracion_min",
+        "ocupacion_maxima_existente", "limite_ocupacion_simultanea",
+    }
+    assert metadata["ocupacion_maxima_existente"] == 1
+    assert metadata["limite_ocupacion_simultanea"] == 2
     json.dumps(metadata)
+
+
+def test_slot_ocupado_capacidad_agotada_no_es_overridable(db_session):
+    """A.4.4 — con 2 citas activas ya coexistiendo en el intervalo
+    (capacidad máxima ya usada: 1 normal + 1 sobrecupo previo),
+    slot_ocupado vuelve a ser absoluto — no admite un tercer
+    sobrecupo."""
+    prof = _profesional(db_session, duracion_min=30)
+    fecha = _dia_habil_futuro_obj()
+    db_session.commit()
+
+    conflictos = analizar_conflictos_slot(
+        profesional=prof, fecha_obj=fecha, hora_obj=time(9, 30),
+        hoy=date.today(), dia_cerrado=None,
+        # A.4.4 — dos citas activas a la MISMA hora: debe pasarse como
+        # secuencia con duplicados preservados, nunca como set() (un
+        # set colapsaría esto a 1 elemento, perdiendo la cardinalidad
+        # que este test existe para probar).
+        ocupadas=[time(9, 30), time(9, 30)],
+    )
+
+    assert _codigos(conflictos) == ["slot_ocupado"]
+    assert conflictos[0].overridable_con_sobrecupo is False
+    assert conflictos[0].metadata["ocupacion_maxima_existente"] == 2
 
 
 def test_slot_ocupado_no_incluye_ids_de_citas_ocupantes(db_session):
@@ -524,12 +558,16 @@ def test_slot_ocupado_mas_en_colacion(db_session):
     )
 
     assert _codigos(conflictos) == ["slot_ocupado", "en_colacion"]
-    assert hay_bloqueo_absoluto(conflictos) is True
+    # A.4.4 — con 1 sola ocupación existente, slot_ocupado ahora
+    # también es overridable (capacidad de sobrecupo disponible): con
+    # en_colacion (siempre overridable), ningún conflicto absoluto
+    # queda presente.
+    assert hay_bloqueo_absoluto(conflictos) is False
 
     disponible, motivo, _mensaje, overridable = _legacy(
         prof, fecha, time(13, 0), date.today(), ocupadas={time(13, 0)},
     )
-    assert (disponible, motivo, overridable) == (False, "slot_ocupado", False)
+    assert (disponible, motivo, overridable) == (False, "slot_ocupado", True)
     assert motivo == conflictos[0].codigo
 
 
@@ -544,12 +582,16 @@ def test_slot_ocupado_mas_fuera_de_jornada(db_session):
     )
 
     assert _codigos(conflictos) == ["slot_ocupado", "fuera_de_jornada"]
-    assert hay_bloqueo_absoluto(conflictos) is True
+    # A.4.4 — 1 sola ocupación existente: slot_ocupado ahora también
+    # es overridable (capacidad de sobrecupo disponible). Junto con
+    # fuera_de_jornada (siempre overridable), ningún conflicto
+    # absoluto queda presente.
+    assert hay_bloqueo_absoluto(conflictos) is False
 
     disponible, motivo, _mensaje, overridable = _legacy(
         prof, fecha, time(16, 0), date.today(), ocupadas={time(16, 0)},
     )
-    assert (disponible, motivo, overridable) == (False, "slot_ocupado", False)
+    assert (disponible, motivo, overridable) == (False, "slot_ocupado", True)
     assert motivo == conflictos[0].codigo
 
 
@@ -567,12 +609,16 @@ def test_slot_ocupado_mas_fuera_de_jornada_mas_en_colacion(db_session):
     )
 
     assert _codigos(conflictos) == ["slot_ocupado", "fuera_de_jornada", "en_colacion"]
-    assert hay_bloqueo_absoluto(conflictos) is True
+    # A.4.4 — 1 sola ocupación existente: slot_ocupado ahora también
+    # es overridable. Los otros dos conflictos ya eran overridable
+    # sin cambios — ningún conflicto absoluto queda presente.
+    assert hay_bloqueo_absoluto(conflictos) is False
 
     disponible, motivo, _mensaje, overridable = _legacy(
         prof, fecha, time(12, 30), date.today(), ocupadas={time(12, 30)},
     )
     assert motivo == conflictos[0].codigo == "slot_ocupado"
+    assert overridable is True
 
 
 def test_fuera_de_jornada_mas_en_colacion_sin_slot_ocupado(db_session):

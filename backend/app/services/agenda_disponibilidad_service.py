@@ -347,12 +347,76 @@ Alcance explícito de A.2 (ver auditoría previa de Agenda V2):
   no agrega aprobación, notificación, permisos nuevos, ni toca
   `POST /admin/citas/urgente` — sigue completamente fuera de este
   análisis, igual que en A.2/A.3 (ver arriba).
+
+── A.4.4 — sobrecupo INTENCIONAL sobre slot_ocupado (máximo 2) ──
+
+  Decisión de producto (aprobada explícitamente, no inventada acá):
+  `slot_ocupado` deja de ser SIEMPRE absoluto. Pasa a depender de
+  cuántas citas activas ya coexisten en el intervalo solicitado:
+
+    - 0 citas activas simultáneas -> no hay conflicto (como siempre).
+    - 1 cita activa simultánea    -> `slot_ocupado` SIGUE apareciendo
+      (el slot sigue `disponible=False`, motivo="slot_ocupado" — ver
+      `listar_disponibilidad_rango()`, que debe seguir mostrando el
+      slot como no disponible aun cuando admita sobrecupo), pero
+      ahora con `overridable_con_sobrecupo=True`: un sobrecupo
+      intencional (`sobrecupo=True` + `agenda.gestionar` +
+      `agenda.sobrecupo` + motivo humano, vía
+      `sobrecupo_policy_service.evaluar_politica_sobrecupo()`, SIN
+      cambios en esa política) puede autorizar una SEGUNDA cita.
+    - 2+ citas activas simultáneas -> `overridable_con_sobrecupo=False`
+      de nuevo: capacidad de sobrecupo agotada, bloqueo absoluto igual
+      que antes de A.4.4, sin excepción por permiso/motivo.
+
+  CARDINALIDAD, no solo existencia: antes de A.4.4,
+  `_horas_ocupadas_normalizadas()` devolvía `set[time]` — suficiente
+  para "ocupado sí/no", pero dos citas activas a la MISMA hora
+  colapsaban a un solo elemento, perdiendo que ya había 2. Ahora
+  conserva duplicados (`tuple[time, ...]`) — única fuente, ningún
+  set() paralelo — y `_max_ocupacion_concurrente()` (nuevo, puro,
+  event-sweep sobre intervalos semiabiertos) calcula la ocupación
+  concurrente MÁXIMA real dentro de `[inicio_solicitado,
+  fin_solicitado)`, no el conteo de filas que solapan la solicitud:
+  dos citas existentes ADYACENTES entre sí (nunca simultáneas la una
+  con la otra) no deben contarse como 2 solo porque ambas solapan una
+  solicitud que las abarca a ambas — ver su docstring para el
+  contraejemplo exacto y por qué importa procesar los eventos de FIN
+  antes que los de INICIO cuando coinciden en el mismo instante
+  (semántica semiabierta, igual que `_intervalos_se_superponen()`).
+
+  `evaluar_politica_sobrecupo()` (A.4.3) NO cambia: ya es agnóstica al
+  código de conflicto — sigue usando `hay_bloqueo_absoluto(conflictos)`
+  genérico sobre la lista completa, así que el límite de capacidad
+  vive ÚNICAMENTE acá (análisis de ocupación), nunca duplicado en la
+  política. El único motivo cuyo `overridable_con_sobrecupo` ahora es
+  dinámico es `slot_ocupado`; ningún otro bloqueo absoluto
+  (`fecha_pasada`, `fin_de_semana`, `dia_cerrado`, `hora_pasada`,
+  `hora_fuera_de_grilla`, `excede_cierre_centro`) cambia.
+
+  NO IDS/datos clínicos: `ConflictoSlot.metadata` para `slot_ocupado`
+  solo agrega `ocupacion_maxima_existente` (int) y
+  `limite_ocupacion_simultanea` (int, siempre
+  `CAPACIDAD_MAXIMA_CITAS_SIMULTANEAS`) — nunca `cita_id`,
+  `estudiante_id`, nombre, RUT ni motivo de consulta de la cita
+  ocupante. La clave NO se llama "capacidad_maxima": esa palabra
+  contiene la subcadena "id" (capac-id-ad) y test_slot_ocupado_no_
+  incluye_ids_de_citas_ocupantes (A.4.2) escanea cualquier aparición
+  de "id" en las claves de metadata, no solo sufijos "_id".
+
+  A.3 sin cambios: `_max_ocupacion_concurrente()` se calcula con la
+  ocupación leída DESPUÉS de `adquirir_lock_agenda_profesional_fecha()`
+  (dentro de `evaluar_disponibilidad_slot()`, como siempre) — nunca
+  antes del lock. Esto es lo que garantiza que, con 1 cita activa y
+  dos solicitudes de sobrecupo concurrentes, la segunda vea `max=2`
+  (no `max=1`) tras el commit de la primera, y sea rechazada: nunca
+  pueden coexistir 3 citas activas en el mismo intervalo.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Sequence
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -370,6 +434,15 @@ HORA_FIN_CENTRO = time(18, 0)
 # Estados de Cita que efectivamente ocupan un slot. Una cita cancelada
 # o marcada como inasistencia no debe seguir bloqueando la hora.
 ESTADOS_CITA_QUE_OCUPAN_SLOT = ("pendiente", "completada")
+
+# A.4.4 — máximo de citas activas que pueden coexistir en el mismo
+# intervalo de un profesional: 1 normal + 1 sobrecupo intencional
+# autorizado. Decisión de producto explícita (ver "A.4.4" en el
+# docstring del módulo) — NO un valor arbitrario elegido acá. Única
+# fuente: tanto `analizar_conflictos_slot()` (decide
+# overridable_con_sobrecupo) como cualquier test que necesite el
+# límite deben leer esta constante, nunca repetir el número 2 suelto.
+CAPACIDAD_MAXIMA_CITAS_SIMULTANEAS = 2
 
 # Duración de bloque a usar cuando la del profesional no es utilizable
 # (None, o <= 0 — ver generar_bloques_jornada). No es una validación de
@@ -738,7 +811,7 @@ def _horas_ocupadas_normalizadas(
     *,
     profesional_id: int,
     fecha: str,
-) -> set[time]:
+) -> tuple[time, ...]:
     """
     Horas ya ocupadas por una cita pendiente/completada de este
     profesional en esta fecha, normalizadas a `time` — para que
@@ -747,6 +820,18 @@ def _horas_ocupadas_normalizadas(
     `Cita.hora` que no se pueda parsear en ningún formato conocido, en
     vez de romper la evaluación de disponibilidad por un dato legado
     inválido.
+
+    A.4.4 — conserva TODAS las filas, incluidos duplicados exactos
+    (dos citas activas a la misma hora): antes devolvía `set[time]`,
+    que colapsaba duplicados a una sola presencia — suficiente cuando
+    `slot_ocupado` era un bloqueo binario ("ocupado sí/no"), pero
+    insuficiente para que `_max_ocupacion_concurrente()` pueda saber
+    CUÁNTAS citas ya coexisten (ver docstring "A.4.4" del módulo).
+    Única fuente: ningún caller que solo necesitaba "existe alguna"
+    (`_hay_solapamiento_con_ocupadas()`, usada también por
+    `hay_solapamiento_con_cita_activa()` para urgencias) cambia de
+    comportamiento — un duplicado nunca altera el resultado de un
+    chequeo booleano de "existe alguno".
     """
     filas = (
         db.query(Cita.hora)
@@ -757,12 +842,12 @@ def _horas_ocupadas_normalizadas(
         )
         .all()
     )
-    ocupadas = set()
+    ocupadas: list[time] = []
     for (hora_str,) in filas:
         hora_obj = _parsear_hora_flexible(hora_str)
         if hora_obj is not None:
-            ocupadas.add(hora_obj)
-    return ocupadas
+            ocupadas.append(hora_obj)
+    return tuple(ocupadas)
 
 
 class SlotInvalidoError(Exception):
@@ -829,7 +914,7 @@ def canonicalizar_fecha_valida(fecha: str) -> str:
 def _hay_solapamiento_con_ocupadas(
     hora_obj: time,
     fin_obj: time,
-    ocupadas: set[time],
+    ocupadas: Sequence[time],
     duracion: int,
 ) -> bool:
     """
@@ -845,12 +930,99 @@ def _hay_solapamiento_con_ocupadas(
     criterio de intervalos sin duplicar la lógica ni arrastrar el
     resto de las reglas de disponibilidad (grilla, jornada, colación,
     cierre de centro), que no le corresponden a ese endpoint.
+
+    A.4.4 — `ocupadas` ahora puede traer duplicados (ver
+    `_horas_ocupadas_normalizadas()`); no afecta este chequeo: un
+    duplicado nunca cambia el resultado de "existe alguno que
+    solape".
     """
     for ocupada in ocupadas:
         ocupada_fin, _ = _fin_intervalo(ocupada, duracion)
         if _intervalos_se_superponen(hora_obj, fin_obj, ocupada, ocupada_fin):
             return True
     return False
+
+
+def _max_ocupacion_concurrente(
+    inicio_solicitado: time,
+    fin_solicitado: time,
+    ocupadas: Sequence[time],
+    duracion_min: int,
+) -> int:
+    """
+    A.4.4 — máxima cantidad de citas activas EXISTENTES que coexisten
+    entre sí en algún punto dentro de `[inicio_solicitado,
+    fin_solicitado)`. Función PURA (no toca DB ni el reloj).
+
+    NO es "cuántas filas de `ocupadas` solapan la solicitud" — eso
+    sobreestima. Contraejemplo (el que motivó este diseño):
+
+        existente A = [09:00, 09:30)
+        existente B = [09:30, 10:00)
+        solicitud    = [09:00, 10:00)
+
+    Ambas A y B solapan la solicitud (2 filas), pero A y B NUNCA
+    coexisten entre sí (B empieza exactamente cuando A termina) — la
+    ocupación concurrente real nunca supera 1 en ningún instante.
+    Contar filas que solapan la solicitud diría "2" y bloquearía un
+    sobrecupo que en realidad cabe perfectamente.
+
+    Algoritmo (event sweep sobre intervalos semiabiertos):
+      1. Se reconstruye el intervalo real de cada `ocupada` como
+         `[ocupada, ocupada + duracion_min)` — misma regla histórica
+         que `_hay_solapamiento_con_ocupadas()`.
+      2. Se descarta cualquier intervalo existente que NO se solape
+         con `[inicio_solicitado, fin_solicitado)` (mismo criterio de
+         `_intervalos_se_superponen()` — semiabierto: un fin que
+         coincide con el inicio de la solicitud, o un inicio que
+         coincide con su fin, NO es solapamiento).
+      3. Los intervalos restantes se RECORTAN a su intersección con
+         `[inicio_solicitado, fin_solicitado)` antes de generar sus
+         eventos — así la concurrencia máxima calculada es siempre la
+         que ocurre DENTRO de la ventana solicitada, nunca una que
+         coincida fuera de ella por casualidad de cómo se solapan dos
+         intervalos parcialmente incluidos.
+      4. Se generan dos eventos por intervalo recortado: inicio (+1) y
+         fin (-1). Se ordenan por hora y, en caso de empate exacto, el
+         evento de FIN se procesa ANTES que el de INICIO — así un
+         intervalo que termina exactamente cuando otro empieza (como A
+         y B arriba) nunca se cuenta como simultáneo, preservando la
+         misma semántica semiabierta [inicio, fin) que el resto del
+         módulo.
+      5. Se recorren los eventos acumulando un contador y se devuelve
+         el máximo alcanzado. Si `ocupadas` no aporta ningún intervalo
+         que solape la solicitud, el máximo es 0.
+
+    Conserva duplicados: dos citas activas exactamente a la misma hora
+    (`ocupadas` con la hora repetida) generan dos intervalos
+    independientes en el sweep — nunca se colapsan.
+
+    No usa ningún ID de cita ni dato clínico: solo opera sobre horas.
+    """
+    eventos: list[tuple[time, int]] = []
+    for ocupada in ocupadas:
+        fin_ocupada, _ = _fin_intervalo(ocupada, duracion_min)
+        if not _intervalos_se_superponen(
+            inicio_solicitado, fin_solicitado, ocupada, fin_ocupada,
+        ):
+            continue
+        inicio_recortado = max(ocupada, inicio_solicitado)
+        fin_recortado = min(fin_ocupada, fin_solicitado)
+        eventos.append((inicio_recortado, 1))
+        eventos.append((fin_recortado, -1))
+
+    # Empate en la misma hora: FIN (-1) antes que INICIO (+1) — como
+    # -1 < 1, ordenar por (hora, delta) ya deja los fines primero sin
+    # necesitar una clave de desempate aparte.
+    eventos.sort(key=lambda evento: (evento[0], evento[1]))
+
+    concurrencia = 0
+    maximo = 0
+    for _, delta in eventos:
+        concurrencia += delta
+        if concurrencia > maximo:
+            maximo = concurrencia
+    return maximo
 
 
 def hay_solapamiento_con_cita_activa(
@@ -1064,7 +1236,7 @@ def analizar_conflictos_slot(
     hora_obj: time,
     hoy: date,
     dia_cerrado: DiaCerrado | None,
-    ocupadas: set[time],
+    ocupadas: Sequence[time],
     bloques_grilla: list[time] | None = None,
     ahora: time | None = None,
 ) -> tuple[ConflictoSlot, ...]:
@@ -1234,15 +1406,43 @@ def analizar_conflictos_slot(
     # ── ocupacion: slot_ocupado ──
     # Independiente de todo lo anterior: otra cita activa puede ocupar
     # el intervalo sin importar si además excede jornada/cierre.
-    if _hay_solapamiento_con_ocupadas(hora_obj, fin_obj, ocupadas, duracion):
+    #
+    # A.4.4 — overridable_con_sobrecupo ahora es DINÁMICO, el único
+    # código cuyo flag depende de un cálculo (todos los demás son
+    # constantes por código). `_max_ocupacion_concurrente()` (no
+    # `_hay_solapamiento_con_ocupadas()`, que solo respondía
+    # "ocupado sí/no") da la ocupación concurrente máxima REAL dentro
+    # del intervalo solicitado — ver su docstring y "A.4.4" arriba en
+    # el docstring del módulo para el porqué (adyacencia vs.
+    # concurrencia real). `slot_ocupado` sigue siendo UN solo
+    # ConflictoSlot, nunca una lista de "slot_ocupado_1",
+    # "slot_ocupado_2", etc.
+    ocupacion_maxima = _max_ocupacion_concurrente(
+        hora_obj, fin_obj, ocupadas, duracion,
+    )
+    if ocupacion_maxima > 0:
         conflictos.append(ConflictoSlot(
             codigo="slot_ocupado",
             categoria="ocupacion",
-            overridable_con_sobrecupo=False,
+            overridable_con_sobrecupo=(
+                ocupacion_maxima < CAPACIDAD_MAXIMA_CITAS_SIMULTANEAS
+            ),
             metadata={
                 "inicio_solicitado": hora_hhmm,
                 "fin_solicitado": fin_hhmm,
                 "duracion_min": duracion,
+                # A.4.4 — solo información operacional agregada (un
+                # conteo y un límite), nunca cita_id/estudiante_id ni
+                # ningún dato clínico de la cita ocupante. La clave se
+                # llama "limite_..." y no "capacidad_maxima": esta
+                # última contiene la subcadena "id" (capac-id-ad) y
+                # rompería el contrato de test_slot_ocupado_no_incluye
+                # _ids_de_citas_ocupantes, que escanea CUALQUIER
+                # aparición de "id" en las claves de metadata — no
+                # solo sufijos "_id" — precisamente para que ningún
+                # nombre de campo nuevo se cuele con esa subcadena.
+                "ocupacion_maxima_existente": ocupacion_maxima,
+                "limite_ocupacion_simultanea": CAPACIDAD_MAXIMA_CITAS_SIMULTANEAS,
             },
         ))
 
@@ -1337,7 +1537,7 @@ def _evaluar_slot_en_contexto(
     hora_obj: time,
     hoy: date,
     dia_cerrado: DiaCerrado | None,
-    ocupadas: set[time],
+    ocupadas: Sequence[time],
     bloques_grilla: list[time] | None = None,
     ahora: time | None = None,
 ) -> tuple[bool, str | None, str | None, bool]:
@@ -1725,7 +1925,14 @@ def listar_disponibilidad_rango(
     # Un solo query para todas las citas activas del rango, agrupadas
     # por fecha y ya normalizadas a `time` (misma normalización 24h /
     # "HH:MM AM/PM" que usa el resto del módulo — corrección v2, punto 3).
-    ocupadas_por_fecha: dict[str, set[time]] = {}
+    #
+    # A.4.4 — dict[str, list[time]], NO dict[str, set[time]]: un set()
+    # colapsaría dos citas activas a la misma hora en una sola
+    # presencia, perdiendo la cardinalidad que
+    # _max_ocupacion_concurrente() necesita (ver "A.4.4" en el
+    # docstring del módulo). Única fuente: no se mantiene un set()
+    # paralelo para ningún otro uso.
+    ocupadas_por_fecha: dict[str, list[time]] = {}
     filas_citas = (
         db.query(Cita.fecha, Cita.hora)
         .filter(
@@ -1739,7 +1946,7 @@ def listar_disponibilidad_rango(
     for fecha_str, hora_str in filas_citas:
         hora_obj = _parsear_hora_flexible(hora_str)
         if hora_obj is not None:
-            ocupadas_por_fecha.setdefault(fecha_str, set()).add(hora_obj)
+            ocupadas_por_fecha.setdefault(fecha_str, []).append(hora_obj)
 
     # Duración efectiva única (ver _duracion_efectiva): el mismo número
     # que se usa para construir la grilla es el que se reporta en
@@ -1758,7 +1965,7 @@ def listar_disponibilidad_rango(
     while fecha_actual <= fecha_fin_obj:
         fecha_str = fecha_actual.isoformat()
         dia_cerrado = dias_cerrados_por_fecha.get(fecha_str)
-        ocupadas = ocupadas_por_fecha.get(fecha_str, set())
+        ocupadas = ocupadas_por_fecha.get(fecha_str, [])
 
         slots = []
         for hora_obj in bloques_grilla:

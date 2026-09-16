@@ -461,13 +461,27 @@ def _monkeypatch_router_permisos(monkeypatch, *, gestionar: bool, sobrecupo: boo
     )
 
 
-def test_i_slot_ocupado_sigue_409_pese_a_sobrecupo_permiso_y_motivo(db_session, monkeypatch):
+def test_i_slot_ocupado_capacidad_agotada_sigue_409_pese_a_sobrecupo_permiso_y_motivo(db_session, monkeypatch):
+    """A.4.4 — con la capacidad máxima ya alcanzada (2 citas activas
+    coexistiendo: 1 normal + 1 sobrecupo previo), slot_ocupado vuelve
+    a ser absoluto: ni permiso ni motivo lo superan. Antes de A.4.4,
+    UNA sola cita existente ya bastaba para este rechazo — con
+    exactamente 1 cita existente, este mismo escenario ahora SÍ se
+    autoriza (ver test_a4_4_sobrecupo_slot_ocupado.py), así que este
+    test se ajusta a 2 citas existentes para seguir probando lo que
+    realmente le importa: que el límite de capacidad no se puede
+    saltar con permisos ni motivo."""
     fecha = _dia_habil_futuro()
     prof = _profesional(db_session)
     otro_paciente = _usuario(db_session, correo="ocupante-a43@sesaes.cl", rol="estudiante", rut="a43-1")
+    otro_paciente_2 = _usuario(db_session, correo="ocupante-a43-2@sesaes.cl", rol="estudiante", rut="a43-1b")
     db_session.add(Cita(
         estudiante_id=otro_paciente.id, profesional_id=prof.id,
         fecha=fecha, hora="09:00", estado="pendiente",
+    ))
+    db_session.add(Cita(
+        estudiante_id=otro_paciente_2.id, profesional_id=prof.id,
+        fecha=fecha, hora="09:00", estado="pendiente", sobrecupo=True,
     ))
     paciente = _usuario(db_session, correo="paciente-a43-ocupado@sesaes.cl", rol="estudiante", rut="a43-2")
     admin_user = _usuario(db_session, correo="admin-a43-ocupado@sesaes.cl", rol="admin", rut="a43-3")

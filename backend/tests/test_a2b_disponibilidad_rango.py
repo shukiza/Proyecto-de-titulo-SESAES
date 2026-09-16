@@ -423,10 +423,13 @@ def test_rango_slot_disponible_dentro_de_jornada_sin_ocupar(db_session):
 def test_rango_slot_ocupado_fuera_de_jornada_conserva_prioridad_slot_ocupado(db_session):
     """
     Mismo caso que A.2A corrección v4 (test_slot_ocupado_fuera_de_jornada_
-    es_bloqueo_absoluto_no_overridable), pero pasando por
-    listar_disponibilidad_rango: un slot fuera de jornada (normalmente
-    overridable) que además está ocupado por una cita real debe seguir
-    devolviendo "slot_ocupado" (no overridable), nunca "fuera_de_jornada".
+    es_overridable_con_capacidad_disponible en test_a2_disponibilidad_real.py),
+    pero pasando por listar_disponibilidad_rango: un slot fuera de
+    jornada (normalmente overridable) que además está ocupado por una
+    cita real debe seguir devolviendo "slot_ocupado" (motivo con mayor
+    precedencia), nunca "fuera_de_jornada" — A.4.4: con 1 sola
+    ocupación, overridable_con_sobrecupo es True (capacidad
+    disponible), no False.
     """
     prof = _profesional(
         db_session, horario_inicio="09:00", horario_fin="13:00", duracion_min=30,
@@ -449,7 +452,7 @@ def test_rango_slot_ocupado_fuera_de_jornada_conserva_prioridad_slot_ocupado(db_
     slot_ocupado = next(s for s in slots if s["hora"] == "13:30")
     assert slot_ocupado["disponible"] is False
     assert slot_ocupado["motivo"] == "slot_ocupado"
-    assert slot_ocupado["overridable_con_sobrecupo"] is False
+    assert slot_ocupado["overridable_con_sobrecupo"] is True
 
 
 def test_rango_slot_en_colacion_es_overridable(db_session):

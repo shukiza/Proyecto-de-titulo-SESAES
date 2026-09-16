@@ -369,20 +369,30 @@ def test_hora_alineada_pero_fuera_de_jornada_sigue_siendo_overridable(db_session
 # Corrección v4 — orden OCUPACIÓN antes que jornada/colación.
 #
 # "fuera_de_jornada"/"en_colacion" son overridable_con_sobrecupo=True.
-# "slot_ocupado" es un bloqueo absoluto. Si ocupación se evaluara
-# DESPUÉS de jornada/colación, un slot que está fuera de jornada (o en
-# colación) Y ADEMÁS ya ocupado devolvería el motivo overridable
-# primero, dejando que sobrecupo=True lo autorizara sin llegar nunca a
-# ver que la hora ya estaba tomada. Estos tests fijan esa jerarquía a
-# nivel del servicio; los equivalentes a nivel de POST /citas están
-# más abajo, junto al resto de tests de sobrecupo.
+# "slot_ocupado" TENÍA precedencia como bloqueo absoluto simple. Si
+# ocupación se evaluara DESPUÉS de jornada/colación, un slot que está
+# fuera de jornada (o en colación) Y ADEMÁS ya ocupado devolvería el
+# motivo overridable primero, dejando que sobrecupo=True lo autorizara
+# sin llegar nunca a ver que la hora ya estaba tomada. Estos tests
+# fijan esa jerarquía de PRECEDENCIA (qué motivo gana como
+# resultado.motivo) a nivel del servicio — sigue siendo "slot_ocupado"
+# siempre que haya al menos una ocupación, aunque desde A.4.4 su
+# overridable_con_sobrecupo ya no sea una constante fija (ver
+# test_slot_ocupado_fuera_de_jornada_es_overridable_con_capacidad_
+# disponible / ...en_colacion... más abajo, y CAPACIDAD_MAXIMA_
+# CITAS_SIMULTANEAS en agenda_disponibilidad_service.py). Los
+# equivalentes a nivel de POST /citas están más abajo, junto al resto
+# de tests de sobrecupo.
 # ──────────────────────────────────────────────────────────
 
-def test_slot_ocupado_fuera_de_jornada_es_bloqueo_absoluto_no_overridable(db_session):
+def test_slot_ocupado_fuera_de_jornada_es_overridable_con_capacidad_disponible(db_session):
     """08:00 está alineado a la grilla pero fuera de jornada (09:00-17:00)
     — por sí solo sería 'fuera_de_jornada' (overridable). Si además ya
-    está ocupado por otra cita, debe ganar 'slot_ocupado' (NO
-    overridable), no 'fuera_de_jornada'."""
+    está ocupado por UNA sola cita, sigue ganando 'slot_ocupado' como
+    motivo (mayor precedencia que fuera_de_jornada), pero A.4.4 lo hace
+    overridable_con_sobrecupo=True porque todavía queda capacidad para
+    un sobrecupo (máximo 2 simultáneas) — ya no es un bloqueo absoluto
+    con una sola ocupación."""
     fecha = _dia_habil_futuro()
     prof = _profesional_v3_orden(db_session)
     otro = _estudiante(db_session, correo="ocupante@sesaes.cl", rut="9-9")
@@ -395,13 +405,15 @@ def test_slot_ocupado_fuera_de_jornada_es_bloqueo_absoluto_no_overridable(db_ses
 
     assert resultado.disponible is False
     assert resultado.motivo == "slot_ocupado"
-    assert resultado.overridable_con_sobrecupo is False
+    assert resultado.overridable_con_sobrecupo is True
 
 
-def test_slot_ocupado_en_colacion_es_bloqueo_absoluto_no_overridable(db_session):
+def test_slot_ocupado_en_colacion_es_overridable_con_capacidad_disponible(db_session):
     """12:30 está alineado a la grilla y cae en colación (12:30-13:00)
     — por sí solo sería 'en_colacion' (overridable). Si además ya está
-    ocupado, debe ganar 'slot_ocupado' (NO overridable)."""
+    ocupado por UNA sola cita, sigue ganando 'slot_ocupado', pero
+    A.4.4 lo hace overridable_con_sobrecupo=True (capacidad disponible
+    para un sobrecupo)."""
     fecha = _dia_habil_futuro()
     prof = _profesional(
         db_session,
@@ -421,7 +433,7 @@ def test_slot_ocupado_en_colacion_es_bloqueo_absoluto_no_overridable(db_session)
 
     assert resultado.disponible is False
     assert resultado.motivo == "slot_ocupado"
-    assert resultado.overridable_con_sobrecupo is False
+    assert resultado.overridable_con_sobrecupo is True
 
 
 def test_crear_cita_sobrecupo_rechaza_hora_no_alineada_aunque_fuera_de_jornada(db_session, monkeypatch):
@@ -685,7 +697,12 @@ def test_hora_ya_pasada_hoy_es_rechazada_y_no_overridable(db_session, monkeypatc
     assert resultado.overridable_con_sobrecupo is False
 
 
-def test_slot_ocupado_por_cita_pendiente_es_rechazado_y_no_overridable(db_session):
+def test_slot_ocupado_por_cita_pendiente_es_rechazado_con_capacidad_de_sobrecupo(db_session):
+    """A.4.4 — con 1 sola cita pendiente ocupando el slot, sigue
+    disponible=False/motivo="slot_ocupado" (un GET de disponibilidad
+    simple, sin intención de sobrecupo, sigue viendo el slot como no
+    disponible), pero overridable_con_sobrecupo ahora es True: queda
+    capacidad para un sobrecupo intencional."""
     fecha = _dia_habil_futuro()
     prof = _profesional(db_session)
     est = _estudiante(db_session)
@@ -705,7 +722,7 @@ def test_slot_ocupado_por_cita_pendiente_es_rechazado_y_no_overridable(db_sessio
 
     assert resultado.disponible is False
     assert resultado.motivo == "slot_ocupado"
-    assert resultado.overridable_con_sobrecupo is False
+    assert resultado.overridable_con_sobrecupo is True
 
 
 def test_slot_ocupado_por_sobrecupo_existente_tambien_bloquea(db_session):

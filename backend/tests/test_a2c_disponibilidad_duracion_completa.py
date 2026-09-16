@@ -368,7 +368,9 @@ def test_nueva_cita_que_comienza_antes_y_termina_dentro_de_cita_activa_es_slot_o
 
     assert resultado.disponible is False
     assert resultado.motivo == "slot_ocupado"
-    assert resultado.overridable_con_sobrecupo is False
+    # A.4.4 — 1 sola cita activa solapando: queda capacidad de
+    # sobrecupo (overridable_con_sobrecupo=True), ya no es absoluto.
+    assert resultado.overridable_con_sobrecupo is True
 
 
 def test_nueva_cita_que_comienza_dentro_de_cita_activa_es_slot_ocupado(db_session):
@@ -386,7 +388,9 @@ def test_nueva_cita_que_comienza_dentro_de_cita_activa_es_slot_ocupado(db_sessio
 
     assert resultado.disponible is False
     assert resultado.motivo == "slot_ocupado"
-    assert resultado.overridable_con_sobrecupo is False
+    # A.4.4 — 1 sola cita activa solapando: queda capacidad de
+    # sobrecupo (overridable_con_sobrecupo=True), ya no es absoluto.
+    assert resultado.overridable_con_sobrecupo is True
 
 
 def test_intervalos_adyacentes_sin_solape_no_generan_falso_slot_ocupado(db_session):
