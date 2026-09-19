@@ -865,6 +865,17 @@ toggleSidebarMovil(): void {
   readonly horarioBloqueInfoFn = (fecha: string, hora: string): string =>
     this.getBloqueInfo(fecha, hora);
 
+  // A.4.7A.1 — la grilla ahora consume esto en vez de horarioBloqueInfoFn
+  // para poder renderizar más de una cita por celda.
+  readonly horarioBloqueCitasFn = (fecha: string, hora: string): any[] =>
+    this.getBloqueCitas(fecha, hora);
+
+  // A.4.7A — affordance visual: el dominio sigue diciendo 'ocupado'
+  // (getBloqueEstado no cambia), esta función solo informa si ADEMÁS
+  // existe la posibilidad de un sobrecupo real sobre ese slot ocupado.
+  readonly horarioBloqueSobrecupoDisponibleFn = (fecha: string, hora: string): boolean =>
+    this.puedeSolicitarSobrecupo(fecha, hora);
+
   readonly horarioFormatearFechaFn = (fecha: string): string =>
     this.formatearFecha(fecha);
 
@@ -1139,12 +1150,63 @@ toggleSidebarMovil(): void {
     return h < inicio || h >= fin;
   }
 
-  private buscarCitaEnBloque(fecha: string, hora: string): any {
-    return this.citasHorario.find(c => {
-      if (c.fecha !== fecha) return false;
-      if (c.estado === 'cancelada' || c.estado === 'inasistencia') return false;
-      return this.convertirA24h(c.hora) === hora.substring(0,5);
-    });
+  // A.4.7A.1 — orden determinista de presentación dentro de un mismo
+  // bloque (no depende del orden en que backend entregue el arreglo).
+  // Regla explícita, documentada, y aplicada SIEMPRE — nunca inferida
+  // de la posición de llegada:
+  //   1) urgente primero — es la prioridad clínica más alta; ya era el
+  //      estado de mayor prioridad visual en getBloqueEstado() para un
+  //      único slot (ver arriba), y se mantiene consistente al listar
+  //      varias citas del mismo bloque.
+  //   2) normal (ni urgente ni sobrecupo) a continuación.
+  //   3) sobrecupo al final — es la cita añadida POR SOBRE la capacidad
+  //      normal del slot, por eso se lista después de lo que ya ocupaba
+  //      el cupo original.
+  // urgente y sobrecupo son mutuamente excluyentes por regla de negocio
+  // ya existente (mostrarToggleUrgente / crearCitaDesdeHorario), así
+  // que 1) y 3) nunca compiten por la misma cita.
+  // Desempate (dos citas del mismo rango, p. ej. dos normales en el
+  // mismo slot — caso ya soportado por backend): por id ascendente: es
+  // un valor estable e independiente del orden de llegada del arreglo.
+  // Si faltara id, por nombre de estudiante — nunca por posición.
+  private rangoOrdenCita(c: any): number {
+    if (c?.urgente)   return 0;
+    if (c?.sobrecupo) return 2;
+    return 1;
+  }
+
+  private compararCitasBloque(a: any, b: any): number {
+    const diffRango = this.rangoOrdenCita(a) - this.rangoOrdenCita(b);
+    if (diffRango !== 0) return diffRango;
+
+    const idA = Number(a?.id);
+    const idB = Number(b?.id);
+    if (Number.isFinite(idA) && Number.isFinite(idB) && idA !== idB) {
+      return idA - idB;
+    }
+    return String(a?.estudiante ?? '').localeCompare(String(b?.estudiante ?? ''));
+  }
+
+  // A.4.7A.1 — antes este helper usaba Array.find() y devolvía solo la
+  // PRIMERA cita que calzara con fecha+hora. Con soporte de sobrecupo
+  // real (A.4.4), un mismo slot puede tener legítimamente más de una
+  // cita operativa (p. ej. una normal + una sobrecupo forzada encima).
+  // find() descartaba silenciosamente todo lo que no fuera la primera,
+  // por lo que la grilla semanal solo pintaba una de las dos aunque el
+  // panel contextual (que sí usa filter() sobre citasHorario) mostrara
+  // ambas correctamente. filter() es ahora la única fuente de verdad
+  // para "qué hay en este bloque", igual que ya lo era para el panel;
+  // el .sort() aplica el orden determinista de arriba, así que el
+  // resultado NUNCA depende del orden en que backend entregó el
+  // arreglo original.
+  private buscarCitasEnBloque(fecha: string, hora: string): any[] {
+    return this.citasHorario
+      .filter(c => {
+        if (c.fecha !== fecha) return false;
+        if (c.estado === 'cancelada' || c.estado === 'inasistencia') return false;
+        return this.convertirA24h(c.hora) === hora.substring(0,5);
+      })
+      .sort((a, b) => this.compararCitasBloque(a, b));
   }
 
   esDiaCerrado(fecha: string): boolean {
@@ -1186,10 +1248,16 @@ toggleSidebarMovil(): void {
     // Una cita operacional real tiene prioridad visual. Así, si las dos
     // lecturas llegan en distinto orden, nunca se oculta una reserva real
     // detrás de un estado de disponibilidad.
-    const cita = this.buscarCitaEnBloque(fecha, hora);
-    if (cita) {
-      if (cita.urgente)   return 'urgente';
-      if (cita.sobrecupo) return 'sobrecupo';
+    //
+    // A.4.7A.1 — con más de una cita en el mismo bloque, la prioridad
+    // (urgente > sobrecupo > ocupado) se evalúa sobre TODAS las citas,
+    // no solo sobre la primera: si cualquiera de ellas es urgente o
+    // sobrecupo, el bloque debe reflejarlo aunque la otra cita sea una
+    // reserva normal.
+    const citas = this.buscarCitasEnBloque(fecha, hora);
+    if (citas.length > 0) {
+      if (citas.some(c => c.urgente))   return 'urgente';
+      if (citas.some(c => c.sobrecupo)) return 'sobrecupo';
       return 'ocupado';
     }
 
@@ -1199,9 +1267,26 @@ toggleSidebarMovil(): void {
     return this.claseVisualParaMotivo(slot);
   }
 
+  // A.4.7A.1 — fuente de verdad para el CONTENIDO del bloque (no solo su
+  // color/estado). Reemplaza el uso de getBloqueInfo() en la grilla:
+  // expone el arreglo completo de citas del slot para que la plantilla
+  // pinte una línea por cada una, en vez de una sola cadena que solo
+  // podía representar a la primera cita encontrada.
+  getBloqueCitas(fecha: string, hora: string): any[] {
+    return this.buscarCitasEnBloque(fecha, hora);
+  }
+
+  // Se mantiene por compatibilidad (otros consumidores/tests pueden
+  // seguir llamándolo para obtener un resumen en texto plano), pero ya
+  // no es lo que alimenta la grilla semanal: ahora concatena TODAS las
+  // citas del bloque en vez de reportar solo la primera.
   getBloqueInfo(fecha: string, hora: string): string {
-    const cita = this.buscarCitaEnBloque(fecha, hora);
-    if (cita) return cita.sobrecupo ? `${cita.estudiante} (Sobrecupo)` : cita.estudiante;
+    const citas = this.buscarCitasEnBloque(fecha, hora);
+    if (citas.length > 0) {
+      return citas
+        .map(c => c.sobrecupo ? `${c.estudiante} (Sobrecupo)` : c.estudiante)
+        .join(' · ');
+    }
 
     const slot = this.buscarDisponibilidadEnBloque(fecha, hora);
     if (slot?.motivo === 'en_colacion') return 'Colación';
@@ -1213,11 +1298,45 @@ toggleSidebarMovil(): void {
     return this.citasHorario.filter(c => c.fecha === this.diaSeleccionado);
   }
 
+  // A.4.7A v2 — helper GENÉRICO de capacidad de sobrecupo, unificado para
+  // los tres conflictos overridables reales (slot_ocupado, en_colacion,
+  // fuera_de_jornada). El backend (evaluar_politica_sobrecupo, reglas
+  // E/F) exige agenda.gestionar + agenda.sobrecupo para CUALQUIERA de
+  // los tres, no solo para slot_ocupado — la v1 solo lo exigía para el
+  // caso nuevo, dejando colación/fuera de jornada gateados solo por
+  // agenda.gestionar en el resto de las capas.
+  //
+  // Para 'ocupado' en particular: el dominio de getBloqueEstado() sigue
+  // devolviendo 'ocupado' cuando hay una Cita real (prioridad ya
+  // existente, sin cambios) — por eso esta función consulta POR
+  // SEPARADO disponibilidadPorFecha, para no perder el motivo/
+  // overridable_con_sobrecupo que el early-return de Cita ocultaría si
+  // se mirara solo getBloqueEstado().
+  //
+  // No duplica reglas de backend: solo lee overridable_con_sobrecupo
+  // (ya calculado por backend) y verifica que el motivo real coincida
+  // con el estado visual que el usuario está viendo, para no ofrecer
+  // sobrecupo sobre un conflicto distinto del que se muestra en pantalla.
+  puedeSolicitarSobrecupo(fecha: string, hora: string): boolean {
+    if (!this.hasPermission('agenda.gestionar')) return false;
+    if (!this.hasPermission('agenda.sobrecupo')) return false;
+
+    const estado = this.getBloqueEstado(fecha, hora);
+    if (estado !== 'ocupado' && estado !== 'colacion' && estado !== 'fuera-horario') return false;
+
+    const slot = this.buscarDisponibilidadEnBloque(fecha, hora);
+    if (!slot || slot.overridable_con_sobrecupo !== true) return false;
+
+    if (estado === 'ocupado')       return slot.motivo === 'slot_ocupado';
+    if (estado === 'colacion')      return slot.motivo === 'en_colacion';
+    /* fuera-horario */             return slot.motivo === 'fuera_de_jornada';
+  }
+
   // ══════════════════════════════════════
   // SOBRECUPO — forzar una cita fuera del horario habitual del profesional
   // ══════════════════════════════════════
   sobrecupoConfirmAbierto = false;
-  sobrecupoPendiente: { fecha: string; hora: string; motivoTexto: string } | null = null;
+  sobrecupoPendiente: { fecha: string; hora: string; mensaje: string } | null = null;
 
   clickBloque(fecha: string, hora: string): void {
     const estado = this.getBloqueEstado(fecha, hora);
@@ -1239,15 +1358,43 @@ toggleSidebarMovil(): void {
     if (estado === 'disponible') {
       this.abrirModalNuevaCitaConFechaHora(fecha, hora, false);
     } else if (estado === 'colacion' || estado === 'fuera-horario') {
-      const slot = this.buscarDisponibilidadEnBloque(fecha, hora);
-      if (!slot?.overridable_con_sobrecupo) return;
+      // A.4.7A v2 — capa 2: ahora exige TAMBIÉN agenda.sobrecupo (antes
+      // solo miraba overridable_con_sobrecupo, dejando pasar a cualquier
+      // cuenta con agenda.gestionar).
+      if (!this.puedeSolicitarSobrecupo(fecha, hora)) return;
 
-      this.sobrecupoPendiente = {
-        fecha, hora,
-        motivoTexto: estado === 'colacion'
-          ? 'la hora de colación de'
-          : 'el horario habitual de'
-      };
+      // A.4.7A v3 — el mensaje completo se arma acá (única fuente de
+      // verdad), en vez de concatenar "fuera de {{motivoTexto}} ..." en
+      // el template: esa construcción funcionaba para estos dos casos
+      // pero no era generalizable a slot_ocupado sin producir una frase
+      // gramaticalmente incorrecta (ver caso 'ocupado' más abajo).
+      const profesionalNombre = this.profesionalActual?.nombre ?? 'el profesional';
+      const fechaFormateada = this.formatearFecha(fecha);
+      const mensaje = estado === 'colacion'
+        ? `Estás agendando a las ${hora} del ${fechaFormateada}, durante la hora de colación de ${profesionalNombre}. Esta cita quedará marcada como sobrecupo. ¿Confirmas?`
+        : `Estás agendando a las ${hora} del ${fechaFormateada}, fuera del horario habitual de ${profesionalNombre}. Esta cita quedará marcada como sobrecupo. ¿Confirmas?`;
+
+      this.sobrecupoPendiente = { fecha, hora, mensaje };
+      this.sobrecupoConfirmAbierto = true;
+    } else if (estado === 'ocupado') {
+      // A.4.7A — sobrecupo real sobre un slot ya ocupado (A.4.4). Capa 2
+      // de la defensa en profundidad: puedeSolicitarSobrecupo() ya
+      // exige agenda.gestionar + agenda.sobrecupo + que backend siga
+      // informando ese slot como overridable en este mismo instante.
+      if (!this.puedeSolicitarSobrecupo(fecha, hora)) return;
+
+      // A.4.7A v3 — para slot_ocupado la oración "fuera de un cupo ya
+      // ocupado en la agenda de X" no es correcta ni neutral: acá NO
+      // hay un horario "fuera de jornada", hay ocupación dentro de la
+      // jornada normal. Mensaje propio, sin afirmar cardinalidad (no se
+      // dice "una cita", "un cupo" ni "dos citas" — el contrato del
+      // frontend no expone conteo, eso lo decide backend en A.4.4).
+      const fechaFormateada = this.formatearFecha(fecha);
+      const mensaje = `A las ${hora} del ${fechaFormateada}: este horario ya presenta ocupación. `
+        + 'El sistema permite solicitar un sobrecupo. La disponibilidad volverá a validarse al confirmar. '
+        + '¿Confirmas?';
+
+      this.sobrecupoPendiente = { fecha, hora, mensaje };
       this.sobrecupoConfirmAbierto = true;
     }
   }
@@ -1258,7 +1405,14 @@ toggleSidebarMovil(): void {
   }
 
   confirmarSobrecupo(): void {
-    if (!this.hasPermission('agenda.gestionar')) {
+    // A.4.7A — capa 3: agenda.sobrecupo es exigido por
+    // evaluar_politica_sobrecupo() (backend) para CUALQUIER sobrecupo
+    // efectivo, no solo el de slot ocupado — colación y fuera de
+    // jornada también lo requieren desde A.4.3. Antes de este cambio
+    // solo se validaba agenda.gestionar acá, dejando que una cuenta con
+    // agenda.gestionar pero sin agenda.sobrecupo llegara hasta el modal
+    // de cita para recién enterarse por un 403 del backend.
+    if (!this.hasPermission('agenda.gestionar') || !this.hasPermission('agenda.sobrecupo')) {
       this.cancelarSobrecupo();
       return;
     }
@@ -1282,11 +1436,21 @@ toggleSidebarMovil(): void {
 
   abrirModalNuevaCitaConFechaHora(fecha: string, hora: string, esSobrecupo: boolean = false): void {
     if (!this.hasPermission('agenda.gestionar')) return;
+    // A.4.7A — capa 3b: si el flujo que abre este modal ya es de
+    // sobrecupo (viene de confirmarSobrecupo()), re-verificar acá
+    // también agenda.sobrecupo. Redundante con confirmarSobrecupo() por
+    // diseño (defensa en profundidad, no un único punto de fallo).
+    if (esSobrecupo && !this.hasPermission('agenda.sobrecupo')) return;
     if (this.profesionalActualBloqueado) return;
     if (this.esFechaPasada(fecha)) return;
     this.nuevaCita = {
       fecha, hora, estudiante_id: null, profesional_id: Number(this.filtroProfesionalId),
-      observaciones: '', urgente: false, sobrecupo: esSobrecupo
+      observaciones: '', urgente: false, sobrecupo: esSobrecupo,
+      // A.4.1/A.4.7A — motivo HUMANO del sobrecupo, campo separado de
+      // observaciones (que es el motivo clínico de la consulta). Se
+      // reinicia en cada apertura para que un motivo anterior nunca
+      // quede reutilizado por accidente.
+      sobrecupo_motivo: ''
     };
     this.busquedaEstudiante     = '';
     this.resultadosEstudiante   = [];
@@ -1299,9 +1463,26 @@ toggleSidebarMovil(): void {
     this.busquedaEstudiante = '';
     this.resultadosEstudiante = [];
     this.estudianteSeleccionado = null;
+    // A.4.7A — limpiar el motivo de sobrecupo al cancelar, para que no
+    // sobreviva a la próxima apertura del modal (defensa adicional a la
+    // que ya hace abrirModalNuevaCitaConFechaHora al reconstruir
+    // nuevaCita completo).
+    this.nuevaCita.sobrecupo_motivo = '';
   }
 
-  nuevaCita: any = { fecha: '', hora: '', estudiante_id: null, profesional_id: null, observaciones: '', urgente: false, sobrecupo: false };
+  nuevaCita: any = {
+    fecha: '', hora: '', estudiante_id: null, profesional_id: null,
+    observaciones: '', urgente: false, sobrecupo: false, sobrecupo_motivo: ''
+  };
+
+  // A.4.7A v2 — punto 2: urgencia (A.4.5) y sobrecupo son flujos
+  // separados; el toggle "¿Es urgente?" se oculta por completo mientras
+  // la cita en curso es un sobrecupo, para que no sea posible activarlo
+  // desde la UI (la defensa real está en crearCitaDesdeHorario(), esto
+  // es solo la capa de presentación).
+  get mostrarToggleUrgente(): boolean {
+    return !this.nuevaCita.sobrecupo;
+  }
 
   buscarEstudiante(): void {
     const q = this.busquedaEstudiante.trim();
@@ -1333,14 +1514,75 @@ toggleSidebarMovil(): void {
       this.mensajeError = 'Debes seleccionar un estudiante.';
       setTimeout(() => this.mensajeError = '', 3000); return;
     }
+
+    // A.4.7A v2 — punto 2: urgencia (A.4.5, todavía pendiente) y
+    // sobrecupo son flujos separados y NO deben combinarse. El toggle
+    // "¿Es urgente?" ya se oculta en el modal cuando sobrecupo=true
+    // (mostrarToggleUrgente), pero esto es la defensa en profundidad:
+    // si de cualquier forma nuevaCita quedara con ambos en true, no se
+    // manda ninguna request (ni a /citas ni a /admin/citas/urgente).
+    if (this.nuevaCita.sobrecupo && this.nuevaCita.urgente) {
+      this.mensajeError = 'Urgencia y sobrecupo todavía se gestionan por flujos separados.';
+      setTimeout(() => this.mensajeError = '', 3000);
+      return;
+    }
+
+    // A.4.7A — capa 4 (última, justo antes del POST): agenda.gestionar +
+    // agenda.sobrecupo + motivo se vuelven a exigir acá mismo, sin
+    // confiar en que las capas anteriores (render/clickBloque/
+    // confirmarSobrecupo) no hayan sido saltadas — p. ej. si algo
+    // externo pusiera nuevaCita.sobrecupo=true directamente. Backend
+    // sigue siendo la autoridad final; esto es solo para no mandar una
+    // request que el backend rechazaría, y dar el mensaje de validación
+    // localmente.
+    let sobrecupoMotivoNormalizado: string | null = null;
+    if (this.nuevaCita.sobrecupo) {
+      // A.4.7A v3 — esta capa debe ser AUTOSUFICIENTE: comprueba ambos
+      // permisos explícitamente acá mismo, sin depender de que el
+      // guard de agenda.gestionar del inicio de la función siga
+      // existiendo o mantenga su posición actual. Si falta cualquiera
+      // de los dos, no se manda la request y se muestra el mismo
+      // mensaje de autorización.
+      if (!this.hasPermission('agenda.gestionar') || !this.hasPermission('agenda.sobrecupo')) {
+        this.mensajeError = 'No cuentas con el permiso de sobrecupo (agenda.sobrecupo) para autorizar esta hora.';
+        setTimeout(() => this.mensajeError = '', 3000);
+        return;
+      }
+      const motivo = String(this.nuevaCita.sobrecupo_motivo ?? '').trim();
+      if (!motivo) {
+        this.mensajeError = 'Debes indicar el motivo del sobrecupo.';
+        setTimeout(() => this.mensajeError = '', 3000);
+        return;
+      }
+      sobrecupoMotivoNormalizado = motivo;
+    }
+
     this.creandoCita = true;
     const endpoint = this.nuevaCita.urgente ? `${API}/admin/citas/urgente` : `${API}/citas`;
-    this.http.post<any>(endpoint, {
+    const payload: any = {
       estudiante_id: this.nuevaCita.estudiante_id, profesional_id: this.nuevaCita.profesional_id,
       fecha: this.nuevaCita.fecha, hora: this.nuevaCita.hora,
       observaciones: this.nuevaCita.observaciones, urgente: this.nuevaCita.urgente,
       sobrecupo: this.nuevaCita.sobrecupo || false
-    }).subscribe({
+    };
+    // Campo separado de observaciones (motivo clínico) — nunca se
+    // reutiliza uno por otro. Para cita normal se omite por completo
+    // (ni null ni string vacío), siguiendo el estilo real ya usado en
+    // este payload (el resto de campos opcionales tampoco se envían
+    // "apagados").
+    if (this.nuevaCita.sobrecupo && sobrecupoMotivoNormalizado) {
+      payload.sobrecupo_motivo = sobrecupoMotivoNormalizado;
+    }
+
+    // A.4.7A v2 — punto 1: el mensaje de 409 depende de si ESTA cita es
+    // sobrecupo o no. Se calcula acá (antes del subscribe) porque
+    // cerrarModalCita()/next del éxito no tocan nuevaCita.sobrecupo,
+    // pero por claridad se fija el valor exacto que corresponde a esta
+    // request en particular, sin depender del estado del componente en
+    // el momento en que llega la respuesta.
+    const esSobrecupo = this.nuevaCita.sobrecupo === true;
+
+    this.http.post<any>(endpoint, payload).subscribe({
       next: () => {
         this.cerrarModalCita(); this.cargarHorarioProfesional();
         this.mensajeExito = 'Cita creada correctamente.';
@@ -1349,12 +1591,42 @@ toggleSidebarMovil(): void {
         this.cdr.detectChanges();
       },
       error: (err) => {
-        this.mensajeError = err?.error?.detail || 'No se pudo crear la cita.';
-        setTimeout(() => this.mensajeError = '', 3000);
         this.creandoCita = false;
-        // Si alguien más tomó esa hora justo antes, refrescamos la grilla
-        // para que la celda ya no aparezca como disponible.
-        if (err?.status === 409) {
+        const status = err?.status;
+        const detail = err?.error?.detail;
+
+        // A.4.7A — mapeo de error explícito (400/403/409). El 409
+        // SIEMPRE usa un mensaje UX estable propio, sin importar qué
+        // traiga el detail del backend: no forma parte del contrato
+        // público afirmar cuántas citas existen ya en ese slot. La
+        // palabra "sobrecupo" solo aparece si ESTA cita era realmente
+        // un sobrecupo — una cita normal que pierde la carrera A.3 no
+        // tiene nada que ver con sobrecupo y no debe mencionarlo. Para
+        // 400/403, el detail del backend YA es texto pensado para
+        // mostrarse (ver _mapear_denegacion_sobrecupo) — se usa tal
+        // cual cuando es un string seguro; si no lo es (objeto,
+        // ausente), se cae a un mensaje genérico y nunca se renderiza
+        // "[object Object]".
+        if (status === 409) {
+          this.mensajeError = esSobrecupo
+            ? 'El horario cambió y ya no admite este sobrecupo. La agenda se actualizará.'
+            : 'El horario cambió y ya no está disponible. La agenda se actualizará.';
+        } else if (typeof detail === 'string' && detail.trim()) {
+          this.mensajeError = detail;
+        } else if (status === 403) {
+          this.mensajeError = 'No cuentas con autorización para realizar esta acción.';
+        } else {
+          this.mensajeError = 'No se pudo crear la cita.';
+        }
+        setTimeout(() => this.mensajeError = '', 3000);
+
+        // Si alguien más tomó esa hora (o agotó el cupo de sobrecupo)
+        // justo antes, refrescamos la grilla para que la celda ya no
+        // aparezca con una capacidad que ya no existe — la grilla local
+        // nunca es la fuente de verdad, siempre se vuelve a consultar
+        // backend. Esto aplica igual para una cita normal (A.3) que
+        // para un sobrecupo.
+        if (status === 409) {
           this.cerrarModalCita();
           this.cargarHorarioProfesional();
         }

@@ -269,6 +269,123 @@ describe('AdminHorarioComponent', () => {
     expect(botones[2].disabled).toBe(true);
   });
 
+  it('A.4.7A: el bloque ocupado con sobrecupo disponible recibe la clase derivada y su ícono de affordance, sin dejar de ser "ocupado"', () => {
+    fixture.componentRef.setInput('filtroProfesionalId', '10');
+    fixture.componentRef.setInput('bloqueEstadoFn', () => 'ocupado');
+    fixture.componentRef.setInput('bloqueSobrecupoDisponibleFn', () => true);
+    fixture.componentRef.setInput('horasGrilla', ['08:00']);
+    fixture.componentRef.setInput('semanaActual', [{ fecha: '2026-09-07', nombre: 'Lun', num: 7, esHoy: false }]);
+    fixture.detectChanges();
+
+    const celda = fixture.nativeElement.querySelector('.bloque-celda') as HTMLElement;
+    expect(celda.classList.contains('ocupado')).toBe(true);
+    expect(celda.classList.contains('ocupado-sobrecupo-disponible')).toBe(true);
+    expect(celda.querySelector('.agenda-sobrecupo-affordance')).toBeTruthy();
+  });
+
+  it('A.4.7A: un bloque ocupado SIN sobrecupo disponible no recibe la clase derivada ni el ícono', () => {
+    fixture.componentRef.setInput('filtroProfesionalId', '10');
+    fixture.componentRef.setInput('bloqueEstadoFn', () => 'ocupado');
+    fixture.componentRef.setInput('bloqueSobrecupoDisponibleFn', () => false);
+    fixture.componentRef.setInput('horasGrilla', ['08:00']);
+    fixture.componentRef.setInput('semanaActual', [{ fecha: '2026-09-07', nombre: 'Lun', num: 7, esHoy: false }]);
+    fixture.detectChanges();
+
+    const celda = fixture.nativeElement.querySelector('.bloque-celda') as HTMLElement;
+    expect(celda.classList.contains('ocupado')).toBe(true);
+    expect(celda.classList.contains('ocupado-sobrecupo-disponible')).toBe(false);
+    expect(celda.querySelector('.agenda-sobrecupo-affordance')).toBeFalsy();
+  });
+
+  it('A.4.7A.1 — un bloque con cita normal + sobrecupo en el mismo slot renderiza AMBAS en la misma bloque-celda', () => {
+    fixture.componentRef.setInput('filtroProfesionalId', '10');
+    fixture.componentRef.setInput('bloqueEstadoFn', () => 'sobrecupo');
+    fixture.componentRef.setInput('bloqueSobrecupoDisponibleFn', () => false);
+    fixture.componentRef.setInput('horasGrilla', ['08:00']);
+    fixture.componentRef.setInput('semanaActual', [{ fecha: '2026-09-07', nombre: 'Lun', num: 7, esHoy: false }]);
+    // El orden determinista (normal antes de sobrecupo) es responsabilidad
+    // de buscarCitasEnBloque()/getBloqueCitas() en dashboard-admin.ts; acá
+    // el componente solo debe iterar fielmente lo que bloqueCitasFn() le
+    // entregue — se le pasa ya en el orden esperado, como lo entregaría el
+    // padre real.
+    fixture.componentRef.setInput('bloqueCitasFn', () => [
+      { id: 1, estudiante: 'Diego Soto', sobrecupo: false, urgente: false },
+      { id: 2, estudiante: 'Carlos Muñoz', sobrecupo: true, urgente: false }
+    ]);
+    fixture.detectChanges();
+
+    const celdas = fixture.nativeElement.querySelectorAll('.bloque-celda');
+    expect(celdas.length).toBe(1); // una sola celda para las 08:00 — no se duplica la hora
+    const celda = celdas[0] as HTMLElement;
+
+    expect(celda.classList.contains('multi-cita')).toBe(true);
+
+    const lineasCita = celda.querySelectorAll('.bloque-info');
+    expect(lineasCita.length).toBe(2); // exactamente dos elementos de cita, no más
+
+    expect(celda.textContent).toContain('Diego Soto');
+    expect(celda.textContent).toContain('Carlos Muñoz');
+    expect(celda.textContent).toContain('(Sobrecupo)');
+
+    // La marca "(Sobrecupo)" pertenece a la línea de Carlos, no a la de Diego.
+    expect(lineasCita[0].textContent).toContain('Diego Soto');
+    expect(lineasCita[0].textContent).not.toContain('Sobrecupo');
+    expect(lineasCita[1].textContent).toContain('Carlos Muñoz');
+    expect(lineasCita[1].textContent).toContain('Sobrecupo');
+  });
+
+  it('A.4.7A.1 — un bloque con una sola cita NO recibe la clase multi-cita', () => {
+    fixture.componentRef.setInput('filtroProfesionalId', '10');
+    fixture.componentRef.setInput('bloqueEstadoFn', () => 'ocupado');
+    fixture.componentRef.setInput('bloqueSobrecupoDisponibleFn', () => false);
+    fixture.componentRef.setInput('horasGrilla', ['08:00']);
+    fixture.componentRef.setInput('semanaActual', [{ fecha: '2026-09-07', nombre: 'Lun', num: 7, esHoy: false }]);
+    fixture.componentRef.setInput('bloqueCitasFn', () => [
+      { id: 1, estudiante: 'Diego Soto', sobrecupo: false, urgente: false }
+    ]);
+    fixture.detectChanges();
+
+    const celda = fixture.nativeElement.querySelector('.bloque-celda') as HTMLElement;
+    expect(celda.classList.contains('multi-cita')).toBe(false);
+    expect(celda.querySelectorAll('.bloque-info').length).toBe(1);
+    expect(celda.textContent).toContain('Diego Soto');
+    expect(celda.textContent).not.toContain('Sobrecupo');
+  });
+
+  it('A.4.7A v2: bloqueTitulo condiciona colación/fuera de jornada a bloqueSobrecupoDisponibleFn (no promete una acción sin permiso)', () => {
+    fixture.componentRef.setInput('bloqueSobrecupoDisponibleFn', (_f: string, h: string) => h === '08:00');
+    fixture.detectChanges();
+
+    component.bloqueEstadoFn = () => 'ocupado';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('Horario ocupado — clic para solicitar sobrecupo');
+
+    component.bloqueEstadoFn = () => 'sin-datos';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('Disponibilidad aún no disponible');
+
+    component.bloqueEstadoFn = () => 'cerrado-centro';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('El centro no atiende este día');
+
+    // Con capacidad de sobrecupo (hora 08:00, según el mock de arriba):
+    // el título SÍ promete la acción.
+    component.bloqueEstadoFn = () => 'fuera-horario';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('Fuera del horario habitual — clic para solicitar sobrecupo');
+
+    component.bloqueEstadoFn = () => 'colacion';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('Hora de colación — clic para solicitar sobrecupo');
+
+    // Sin capacidad de sobrecupo (otra hora, bloqueSobrecupoDisponibleFn
+    // devuelve false): el título describe el bloqueo, pero NO promete una
+    // acción que clickBloque() ya no permitiría ejecutar.
+    component.bloqueEstadoFn = () => 'fuera-horario';
+    expect(component.bloqueTitulo('2026-09-07', '09:00')).toBe('Fuera del horario habitual del profesional');
+
+    component.bloqueEstadoFn = () => 'colacion';
+    expect(component.bloqueTitulo('2026-09-07', '09:00')).toBe('Hora de colación del profesional');
+
+    component.bloqueEstadoFn = () => 'disponible';
+    expect(component.bloqueTitulo('2026-09-07', '08:00')).toBe('');
+  });
+
   it('AGENDA-A calcula KPIs semanales solo con datos operativos reales', () => {
     fixture.componentRef.setInput('filtroProfesionalId', '10');
     fixture.componentRef.setInput('semanaActual', [

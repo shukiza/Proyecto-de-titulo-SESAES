@@ -1140,7 +1140,23 @@ tr.fila-urgente { background: #fff6f5; }
   background: #f5f3ff; border: 1.5px solid #7c3aed; color: #4c1d95;
   border-radius: 8px; padding: 10px 14px; font-size: 12.5px; line-height: 1.4;
   margin: 0 0 16px 0;
+  display: flex; align-items: flex-start; gap: 8px;
 }
+.aviso-sobrecupo-modal .material-symbols-outlined { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
+
+/* A.4.7A — iconografía Material Symbols de los modales de cita/sobrecupo
+   (reemplaza los emojis ✕/🟣 previos; ver también .aviso-sobrecupo-modal). */
+.modal-header h3 { display: flex; align-items: center; gap: 6px; }
+.modal-header h3 .material-symbols-outlined { font-size: 18px; color: #7c3aed; }
+.modal-cerrar .material-symbols-outlined { font-size: 18px; }
+
+.campo-grupo textarea {
+  width: 100%; resize: vertical; min-height: 64px;
+  font-family: inherit; font-size: 13px; padding: 8px 10px;
+  border: 1.5px solid #e7ebef; border-radius: 8px; color: #17202a;
+}
+.campo-grupo textarea:focus { outline: none; border-color: #0d9488; }
+.dashboard.tema-oscuro .campo-grupo textarea { background: #1c2534; border-color: #3a4a63; color: #e6edf3; }
 
 /* ══════════════════════════════════════ */
 /* TEMA OSCURO                           */

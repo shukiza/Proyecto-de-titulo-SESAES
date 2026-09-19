@@ -235,6 +235,8 @@
         [diasCerrados]="diasCerrados"
         [bloqueEstadoFn]="horarioBloqueEstadoFn"
         [bloqueInfoFn]="horarioBloqueInfoFn"
+        [bloqueCitasFn]="horarioBloqueCitasFn"
+        [bloqueSobrecupoDisponibleFn]="horarioBloqueSobrecupoDisponibleFn"
         [formatearFechaFn]="horarioFormatearFechaFn"
         [esFeriadoFn]="horarioEsFeriadoFn"
         [nombreFeriadoFn]="horarioNombreFeriadoFn"
@@ -429,10 +431,13 @@
     <div class="modal" (click)="$event.stopPropagation()">
       <div class="modal-header">
         <h3>Nueva Cita{{ nuevaCita.urgente ? ' — URGENTE' : '' }}{{ nuevaCita.sobrecupo ? ' — SOBRECUPO' : '' }}</h3>
-        <button class="modal-cerrar" (click)="cerrarModalCita()">✕</button>
+        <button class="modal-cerrar" (click)="cerrarModalCita()" aria-label="Cerrar">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
       </div>
       <p class="aviso-sobrecupo-modal" *ngIf="nuevaCita.sobrecupo">
-        🟣 Estás agendando fuera del horario habitual del profesional. Esta cita quedará marcada como <strong>sobrecupo</strong>.
+        <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+        Estás creando una cita como <strong>sobrecupo</strong>. El sistema volverá a validar la disponibilidad al confirmar.
       </p>
       <div class="campo-grupo" style="margin-bottom:12px; position:relative">
         <label>Buscar estudiante (nombre o RUT) *</label>
@@ -453,30 +458,45 @@
           <label>Observaciones (opcional)</label>
           <input [(ngModel)]="nuevaCita.observaciones" placeholder="Motivo de la cita" />
         </div>
-        <div class="campo-grupo toggle-row" style="grid-column: 1 / -1">
+        <!-- A.4.7A — motivo del sobrecupo: campo SEPARADO de observaciones,
+             exigido por backend para cualquier sobrecupo efectivo. Solo
+             aparece cuando esta cita ya viene marcada como sobrecupo. -->
+        <div class="campo-grupo" style="grid-column: 1 / -1" *ngIf="nuevaCita.sobrecupo">
+          <label>Motivo del sobrecupo *</label>
+          <textarea [(ngModel)]="nuevaCita.sobrecupo_motivo" rows="3"
+              placeholder="Explica por qué corresponde autorizar este sobrecupo"></textarea>
+          <span class="campo-error" *ngIf="nuevaCita.sobrecupo && !(nuevaCita.sobrecupo_motivo || '').trim()">
+            Debes indicar el motivo del sobrecupo.
+          </span>
+        </div>
+        <div class="campo-grupo toggle-row" style="grid-column: 1 / -1" *ngIf="mostrarToggleUrgente">
           <span>¿Es urgente?</span>
           <div class="toggle" [class.on]="nuevaCita.urgente" (click)="nuevaCita.urgente = !nuevaCita.urgente"></div>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn-cancelar-modal" (click)="cerrarModalCita()">Cancelar</button>
-        <button class="btn-guardar-modal" [disabled]="creandoCita" (click)="crearCitaDesdeHorario()">{{ creandoCita ? 'Creando…' : 'Confirmar Cita' }}</button>
+        <button class="btn-guardar-modal"
+            [disabled]="creandoCita || (nuevaCita.sobrecupo && !(nuevaCita.sobrecupo_motivo || '').trim())"
+            (click)="crearCitaDesdeHorario()">{{ creandoCita ? 'Creando…' : 'Confirmar Cita' }}</button>
       </div>
     </div>
   </div>
 
   <!-- MODAL: CONFIRMAR SOBRECUPO -->
-  <div class="modal-overlay" *ngIf="sobrecupoConfirmAbierto && hasPermission('agenda.gestionar')" (click)="cancelarSobrecupo()">
+  <div class="modal-overlay" *ngIf="sobrecupoConfirmAbierto && hasPermission('agenda.gestionar') && hasPermission('agenda.sobrecupo')" (click)="cancelarSobrecupo()">
     <div class="modal" (click)="$event.stopPropagation()" style="max-width: 420px;">
       <div class="modal-header">
-        <h3>🟣 Confirmar sobrecupo</h3>
-        <button class="modal-cerrar" (click)="cancelarSobrecupo()">✕</button>
+        <h3>
+          <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+          Confirmar sobrecupo
+        </h3>
+        <button class="modal-cerrar" (click)="cancelarSobrecupo()" aria-label="Cerrar">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
       </div>
       <p style="font-size: 13.5px; color: #475569; line-height: 1.5; margin: 0 0 20px 0;">
-        Estás agendando a las <strong>{{ sobrecupoPendiente?.hora }}</strong> del
-        <strong>{{ diaSeleccionado ? formatearFecha(diaSeleccionado) : '' }}</strong>,
-        fuera de {{ sobrecupoPendiente?.motivoTexto }} {{ profesionalActual?.nombre }}.
-        Esta cita quedará marcada como <strong>sobrecupo</strong>. ¿Confirmas?
+        {{ sobrecupoPendiente?.mensaje }}
       </p>
       <div class="modal-footer">
         <button class="btn-cancelar-modal" (click)="cancelarSobrecupo()">Cancelar</button>
@@ -484,6 +504,7 @@
       </div>
     </div>
   </div>
+
 
   <!-- MODAL: CITAS CANCELADAS POR UN DÍA CERRADO -->
   <div class="modal-overlay" *ngIf="modalCitasDiaCerradoAbierto" (click)="modalCitasDiaCerradoAbierto = false">

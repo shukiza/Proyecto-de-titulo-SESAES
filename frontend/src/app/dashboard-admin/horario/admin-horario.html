@@ -169,6 +169,7 @@
             *ngFor="let h of horasGrilla"
             [class.disponible]="bloqueEstadoFn(dia.fecha, h) === 'disponible'"
             [class.ocupado]="bloqueEstadoFn(dia.fecha, h) === 'ocupado'"
+            [class.ocupado-sobrecupo-disponible]="bloqueEstadoFn(dia.fecha, h) === 'ocupado' && bloqueSobrecupoDisponibleFn(dia.fecha, h)"
             [class.urgente-bloque]="bloqueEstadoFn(dia.fecha, h) === 'urgente'"
             [class.sobrecupo-bloque]="bloqueEstadoFn(dia.fecha, h) === 'sobrecupo'"
             [class.colacion-bloque]="bloqueEstadoFn(dia.fecha, h) === 'colacion'"
@@ -176,12 +177,28 @@
             [class.bloqueado]="bloqueEstadoFn(dia.fecha, h) === 'bloqueado'"
             [class.cerrado-centro-bloque]="bloqueEstadoFn(dia.fecha, h) === 'cerrado-centro'"
             [class.sin-datos-bloque]="bloqueEstadoFn(dia.fecha, h) === 'sin-datos'"
+            [class.multi-cita]="bloqueCitasFn(dia.fecha, h).length > 1"
             [attr.aria-disabled]="bloqueEstadoFn(dia.fecha, h) === 'sin-datos' ? 'true' : null"
-            [title]="bloqueEstadoFn(dia.fecha, h) === 'sin-datos' ? 'Disponibilidad aún no disponible' : (bloqueEstadoFn(dia.fecha, h) === 'cerrado-centro' ? 'El centro no atiende este día' : (bloqueEstadoFn(dia.fecha, h) === 'fuera-horario' ? 'Fuera del horario habitual — clic para forzar sobrecupo' : (bloqueEstadoFn(dia.fecha, h) === 'colacion' ? 'Hora de colación — clic para forzar sobrecupo' : '')))"
+            [title]="bloqueTitulo(dia.fecha, h)"
             (click)="bloqueClick.emit({ fecha: dia.fecha, hora: h })"
           >
-            <span *ngIf="bloqueInfoFn(dia.fecha, h) as info" class="bloque-info">{{ info }}</span>
-            <span *ngIf="!bloqueInfoFn(dia.fecha, h) && bloqueEstadoFn(dia.fecha, h) === 'disponible'" class="agenda-slot-available">+ Disponible</span>
+            <!-- A.4.7A.1 — un bloque puede tener más de una cita real en
+                 el mismo slot (p. ej. normal + sobrecupo forzada encima).
+                 Antes se leía un único bloqueInfoFn(...), que solo podía
+                 representar a la primera; ahora se itera bloqueCitasFn(...)
+                 completo para que ninguna cita quede oculta detrás de otra. -->
+            <ng-container *ngIf="bloqueCitasFn(dia.fecha, h) as citasBloque">
+              <span *ngFor="let c of citasBloque"
+                    class="bloque-info"
+                    [class.bloque-info-sobrecupo]="c.sobrecupo"
+                    [class.bloque-info-urgente]="c.urgente">
+                {{ c.estudiante }}<small *ngIf="c.sobrecupo"> (Sobrecupo)</small>
+              </span>
+              <span *ngIf="citasBloque.length === 0 && bloqueEstadoFn(dia.fecha, h) === 'disponible'" class="agenda-slot-available">+ Disponible</span>
+              <span *ngIf="citasBloque.length === 0 && bloqueEstadoFn(dia.fecha, h) === 'colacion' && bloqueInfoFn(dia.fecha, h) as infoColacion" class="bloque-info">{{ infoColacion }}</span>
+            </ng-container>
+            <span *ngIf="bloqueEstadoFn(dia.fecha, h) === 'ocupado' && bloqueSobrecupoDisponibleFn(dia.fecha, h)"
+                class="material-symbols-outlined agenda-sobrecupo-affordance" aria-hidden="true">add_circle</span>
           </div>
         </div>
       </div>
@@ -221,13 +238,15 @@
         </div>
 
         <div class="detalle-lista agenda-context-list">
-          <div *ngFor="let cita of citasDiaSeleccionado" class="detalle-cita" [class.urgente]="cita.urgente">
+          <div *ngFor="let cita of citasDiaSeleccionado" class="detalle-cita"
+               [class.urgente]="cita.urgente"
+               [class.cita-sobrecupo]="cita.sobrecupo">
             <span class="detalle-hora">{{ cita.hora }}</span>
             <div class="detalle-info">
-              <strong>{{ cita.estudiante }}</strong>
-              <span>{{ cita.especialidad }}</span>
               <span *ngIf="cita.sobrecupo" class="agenda-inline-tag sobrecupo">Sobrecupo</span>
               <span *ngIf="cita.urgente" class="agenda-inline-tag urgente">Urgente</span>
+              <strong>{{ cita.estudiante }}</strong>
+              <span>{{ cita.especialidad }}</span>
             </div>
             <span class="estado-badge" [ngClass]="cita.estado">{{ cita.estado }}</span>
             <div class="detalle-acciones" *ngIf="puedeGestionarAgenda && cita.estado === 'pendiente'">

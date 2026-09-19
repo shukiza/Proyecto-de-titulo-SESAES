@@ -276,6 +276,58 @@
 .agenda-week-grid .bloque-celda.disponible:hover { background: var(--agenda-disponible-bg); }
 .agenda-slot-available { color: var(--agenda-disponible); font-size: 9px; font-weight: 600; opacity: .75; }
 .agenda-week-grid .bloque-celda.ocupado { background: var(--agenda-reservada-bg); border-left: 2px solid var(--agenda-reservada); }
+
+/* A.4.7A — affordance de sobrecupo sobre un slot YA ocupado (A.4.4
+   backend: admite una segunda cita). El dominio sigue siendo 'ocupado'
+   (misma clase base, mismo color de fondo) — este es solo un indicador
+   secundario de que existe una acción adicional disponible. No usar el
+   verde de 'disponible': se mantiene la apariencia de ocupado. */
+.agenda-week-grid .bloque-celda {
+  position: relative;
+}
+
+/* A.4.7A.1 — un bloque puede mostrar más de una cita real en el mismo
+   slot (normal + sobrecupo forzada encima). Se apilan verticalmente en
+   vez de superponerse o descartar todo lo que no sea la primera. */
+.agenda-week-grid .bloque-celda {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+.agenda-week-grid .bloque-celda .bloque-info {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.25;
+}
+.agenda-week-grid .bloque-celda .bloque-info-sobrecupo { color: var(--agenda-sobrecupo); font-weight: 600; }
+.agenda-week-grid .bloque-celda .bloque-info-urgente { color: var(--agenda-urgencia); font-weight: 600; }
+/* Acento visual cuando el slot tiene más de una cita: una franja doble
+   a la izquierda en vez de la franja simple habitual, para que el
+   admin distinga de un vistazo "un slot con dos citas" de "un slot con
+   una cita cualquiera" sin tener que abrir el panel contextual. */
+.agenda-week-grid .bloque-celda.multi-cita {
+  border-left-width: 4px;
+  border-left-style: double;
+}
+.agenda-week-grid .bloque-celda.ocupado.ocupado-sobrecupo-disponible {
+  cursor: pointer;
+  box-shadow: inset 0 0 0 2px var(--agenda-sobrecupo);
+}
+.agenda-week-grid .bloque-celda.ocupado.ocupado-sobrecupo-disponible:hover {
+  background: var(--agenda-sobrecupo-bg);
+}
+.agenda-sobrecupo-affordance {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 13px;
+  color: var(--agenda-sobrecupo);
+  pointer-events: none;
+}
 .agenda-week-grid .bloque-celda.sobrecupo-bloque { background: var(--agenda-sobrecupo-bg); border-left: 2px solid var(--agenda-sobrecupo); }
 .agenda-week-grid .bloque-celda.urgente-bloque { background: var(--agenda-urgencia-bg); border-left: 2px solid var(--agenda-urgencia); }
 .agenda-week-grid .bloque-celda.cerrado-centro-bloque,
@@ -304,9 +356,47 @@
 .agenda-day-summary span { display: block; color: var(--admin-text-secondary); font-size: 9px; line-height: 1.2; }
 .agenda-day-summary strong { display: block; margin-top: 3px; color: var(--admin-text); font-size: 16px; }
 .agenda-context-list { max-height: 360px; }
-.agenda-inline-tag { display: inline-block !important; width: fit-content; margin-top: 3px; padding: 2px 6px; border-radius: 999px; font-size: 8px !important; font-weight: 700; text-transform: uppercase; }
-.agenda-inline-tag.sobrecupo { background: var(--agenda-sobrecupo-bg); color: #6D28D9 !important; }
-.agenda-inline-tag.urgente { background: var(--agenda-urgencia-bg); color: #C9182B !important; }
+
+/* Restyle solicitado: el panel contextual debe distinguir de un vistazo
+   una cita normal de una sobrecupo (o urgente), igual que ya lo hace la
+   grilla semanal — no solo con el tag de texto pequeño de antes, sino
+   con un acento de color en toda la tarjeta, tomando los mismos tokens
+   de la leyenda superior (Reservada / Sobrecupo / Urgencia). */
+.detalle-cita {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-left: 4px solid var(--agenda-reservada);
+  background: #fff;
+  margin-bottom: 8px;
+}
+.detalle-cita.cita-sobrecupo {
+  border-left-color: var(--agenda-sobrecupo);
+  background: var(--agenda-sobrecupo-bg);
+}
+.detalle-cita.urgente {
+  border-left-color: var(--agenda-urgencia);
+  background: var(--agenda-urgencia-bg);
+}
+/* Si una cita fuera, a la vez, urgente Y sobrecupo, gana la urgencia
+   (misma prioridad clínica que ya aplica getBloqueEstado() en la grilla:
+   urgente > sobrecupo). En la práctica es mutuamente excluyente por regla
+   de negocio existente, pero se deja la prioridad explícita por si acaso. */
+.detalle-cita.urgente.cita-sobrecupo {
+  border-left-color: var(--agenda-urgencia);
+  background: var(--agenda-urgencia-bg);
+}
+
+.detalle-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.detalle-info strong { font-size: 13px; }
+.detalle-info > span:not(.agenda-inline-tag) { font-size: 12px; color: #6B7280; }
+
+.agenda-inline-tag { display: inline-block !important; width: fit-content; padding: 2px 6px; border-radius: 999px; font-size: 8px !important; font-weight: 700; text-transform: uppercase; }
+.agenda-inline-tag.sobrecupo { background: var(--agenda-sobrecupo); color: #fff !important; }
+.agenda-inline-tag.urgente { background: var(--agenda-urgencia); color: #fff !important; }
 .agenda-panel-empty { padding: 24px 16px; color: var(--admin-text-secondary); font-size: 11px; text-align: center; }
 .agenda-panel-empty-large { min-height: 240px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; }
 .agenda-panel-empty-large .material-symbols-outlined { font-size: 28px; color: var(--admin-primary); }

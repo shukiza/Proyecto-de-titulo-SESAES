@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { of } from 'rxjs';
 
 import { AuthService } from './auth.service';
+import { isPermission } from './shared/auth/permission.model';
 
 
 describe('AuthService — identidad de sesión', () => {
@@ -323,4 +324,110 @@ describe('AuthService — identidad de sesión', () => {
   });
 
 
+});
+
+/**
+ * FE-A1 (A.4.7A) — regresión del hallazgo real: 'agenda.sobrecupo' faltaba
+ * en PERMISSION_VALUES (frontend/src/app/shared/auth/permission.model.ts),
+ * aunque el backend ya lo entrega para SUPERADMIN desde A.4.3. Esto hacía
+ * que normalizarContextoAccesoAdministrativo() rechazara el contexto
+ * COMPLETO de cualquier cuenta cuyo `permisos` incluyera ese string,
+ * dejando hasPermission() fail-closed para TODO (no solo agenda.sobrecupo)
+ * — el sidebar de SUPERADMIN quedaba reducido a Inicio/Mi perfil.
+ */
+describe('AuthService / permission.model — FE-A1: agenda.sobrecupo', () => {
+  it('isPermission acepta agenda.sobrecupo como permiso válido del catálogo', () => {
+    expect(isPermission('agenda.sobrecupo')).toBe(true);
+  });
+
+  it('normaliza sin error un contexto administrativo que incluye agenda.sobrecupo', () => {
+    const http = {
+      get: vi.fn(() => of({
+        rol: 'superadmin',
+        perfil: null,
+        permisos: [
+          'agenda.ver',
+          'agenda.gestionar',
+          'agenda.sobrecupo'
+        ],
+        alcance: {
+          tipo: 'institucional',
+          especialidades: []
+        }
+      }))
+    } as unknown as HttpClient;
+
+    const auth = new AuthService(http);
+    sessionStorage.setItem('rol', 'superadmin');
+
+    let errorRecibido: unknown = null;
+    auth.cargarAccesoAdministrativo().subscribe({
+      error: error => { errorRecibido = error; }
+    });
+
+    expect(errorRecibido).toBeNull();
+    expect(auth.getContextoAccesoAdministrativo()?.permisos).toContain('agenda.sobrecupo');
+  });
+
+  it('hasPermission(agenda.sobrecupo) refleja el permiso efectivo entregado por backend', () => {
+    const http = {
+      get: vi.fn(() => of({
+        rol: 'superadmin',
+        perfil: null,
+        permisos: [
+          'agenda.gestionar',
+          'agenda.sobrecupo'
+        ],
+        alcance: {
+          tipo: 'institucional',
+          especialidades: []
+        }
+      }))
+    } as unknown as HttpClient;
+
+    const auth = new AuthService(http);
+    sessionStorage.setItem('rol', 'superadmin');
+    auth.cargarAccesoAdministrativo().subscribe();
+
+    expect(auth.hasPermission('agenda.sobrecupo')).toBe(true);
+  });
+
+  it('el contexto de SUPERADMIN ya no se invalida por completo cuando incluye agenda.sobrecupo (regresión del hallazgo real)', () => {
+    const http = {
+      get: vi.fn(() => of({
+        rol: 'superadmin',
+        perfil: null,
+        // Mismo catálogo real que entrega hoy el backend para SUPERADMIN
+        // (ROLE_DEFAULT_PERMISSIONS[Role.SUPERADMIN], permissions.py).
+        permisos: [
+          'usuarios.ver', 'usuarios.gestionar',
+          'profesionales.ver', 'profesionales.gestionar',
+          'agenda.ver', 'agenda.gestionar', 'agenda.sobrecupo',
+          'configuracion.gestionar',
+          'reportes.ver', 'reportes.cgr.exportar',
+          'auditoria.ver', 'roles.gestionar'
+        ],
+        alcance: {
+          tipo: 'institucional',
+          especialidades: []
+        }
+      }))
+    } as unknown as HttpClient;
+
+    const auth = new AuthService(http);
+    sessionStorage.setItem('rol', 'superadmin');
+
+    let errorRecibido: unknown = null;
+    auth.cargarAccesoAdministrativo().subscribe({
+      error: error => { errorRecibido = error; }
+    });
+
+    // Antes del fix: esto lanzaba 'Lista de permisos administrativos
+    // invalida.' y dejaba hasPermission() fail-closed para TODO.
+    expect(errorRecibido).toBeNull();
+    expect(auth.hasPermission('agenda.ver')).toBe(true);
+    expect(auth.hasPermission('agenda.gestionar')).toBe(true);
+    expect(auth.hasPermission('roles.gestionar')).toBe(true);
+    expect(auth.hasPermission('agenda.sobrecupo')).toBe(true);
+  });
 });

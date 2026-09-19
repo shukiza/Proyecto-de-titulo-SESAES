@@ -35,6 +35,17 @@ export const PERMISSION_VALUES = [
   'profesionales.gestionar',
   'agenda.ver',
   'agenda.gestionar',
+  // A.4.3 (backend) / A.4.7A (frontend) — capacidad DISTINTA de
+  // agenda.gestionar: poder gestionar una agenda (crear/mover/cancelar
+  // citas normales) no implica poder forzar un sobrecupo sobre un
+  // conflicto real (slot ya ocupado, colación, fuera de jornada). El
+  // backend (backend/app/rbac/permissions.py) ya la incluye en el
+  // catálogo y en ROLE_DEFAULT_PERMISSIONS[SUPERADMIN] desde A.4.3;
+  // esta entrada estaba ausente acá, lo que hacía que
+  // normalizarContextoAccesoAdministrativo() (auth.service.ts)
+  // rechazara TODO el contexto administrativo de cualquier cuenta cuyo
+  // `permisos` incluyera este string (ver hallazgo FE-A1).
+  'agenda.sobrecupo',
   'configuracion.gestionar',
   'reportes.ver',
   'reportes.cgr.exportar',
